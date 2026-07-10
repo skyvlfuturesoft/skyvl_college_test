@@ -1,0 +1,381 @@
+import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { api } from '../../lib/api';
+import { Clock, AlertTriangle, ChevronRight, ChevronLeft, Send, PauseCircle } from 'lucide-react';
+import useExamProctor from '../../hooks/useExamProctor';
+import ViolationModal from '../../components/ViolationModal';
+import '../../app.css';
+import '../../proctor.css';
+
+export default function ExamPage() {
+  const { attemptId } = useParams();
+  const navigate = useNavigate();
+  
+  const [attempt, setAttempt] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [answers, setAnswers] = useState({}); // { questionId: selectedIndex }
+  const [timeLeft, setTimeLeft] = useState(0); // seconds
+  const [violations, setViolations] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  
+  const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
+  
+  const warningRef = useRef(false);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    async function loadExam() {
+      try {
+        const attemptData = await api(`/api/attempts/${attemptId}`);
+        if (attemptData.attempt.status === 'terminated') {
+          navigate(`/student/exam-terminated?reason=${encodeURIComponent('This exam session has been terminated due to security violations.')}`, { replace: true });
+          return;
+        }
+        if (attemptData.attempt.status !== 'in_progress') {
+          navigate(`/student/result/${attemptId}`, { replace: true });
+          return;
+        }
+        
+        const qData = await api(`/api/exams/${attemptData.attempt.exam_id}/questions`);
+        
+        // Calculate remaining seconds
+        const start = new Date(attemptData.attempt.started_at).getTime();
+        const duration = attemptData.attempt.exams.duration * 60; // seconds
+        const now = new Date().getTime();
+        const elapsed = Math.floor((now - start) / 1000);
+        const remaining = Math.max(0, duration - elapsed);
+        
+        setAttempt(attemptData.attempt);
+        setQuestions(qData.questions);
+        setTimeLeft(remaining);
+        setViolations(attemptData.attempt.violation_count || 0);
+
+        // Fetch any answers saved previously (if resuming)
+        const resultData = await api(`/api/attempts/${attemptId}/result`);
+        const savedAnswers = {};
+        resultData.answers.forEach((ans) => {
+          savedAnswers[ans.question_id] = ans.selected_option;
+        });
+        setAnswers(savedAnswers);
+      } catch (err) {
+        setError(err.message || 'Failed to load exam data');
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadExam();
+  }, [attemptId, navigate]);
+
+  // Proctoring Hook
+  const {
+    violationCount: hookViolationCount,
+    showWarningModal,
+    setShowWarningModal,
+    warningMessage,
+    isFinalWarning,
+    isPaused
+  } = useExamProctor(attemptId, currentIdx, answers, timeLeft, () => submitExam(true), violations);
+
+  // Timer loop
+  useEffect(() => {
+    if (loading || timeLeft <= 0 || submitting || isPaused) return;
+
+    timerRef.current = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current);
+          handleAutoSubmit();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timerRef.current);
+  }, [loading, timeLeft, submitting, isPaused]);
+
+  const answersRef = useRef(answers);
+  const debounceTimersRef = useRef({});
+
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+
+  const handleSelectOption = (optionIdx) => {
+    const q = questions[currentIdx];
+    const updated = { ...answers, [q.id]: optionIdx };
+    setAnswers(updated);
+
+    if (debounceTimersRef.current[q.id]) {
+      clearTimeout(debounceTimersRef.current[q.id]);
+    }
+
+    debounceTimersRef.current[q.id] = setTimeout(async () => {
+      try {
+        await api(`/api/attempts/${attemptId}/answer`, {
+          method: 'POST',
+          body: { question_id: q.id, selected_option: optionIdx }
+        });
+        
+        await api('/api/events/log', {
+          method: 'POST',
+          body: {
+            attempt_id: attemptId,
+            event_type: 'answer_saved',
+            details: { question_id: q.id, option_index: optionIdx }
+          }
+        });
+      } catch (err) {
+        console.error('Failed to save answer:', err);
+      }
+    }, 750);
+  };
+
+  const submitExam = async (isAuto = false) => {
+    if (submitting) return;
+    setSubmitting(true);
+    clearInterval(timerRef.current);
+
+    // Flush any pending debounced auto-saves
+    const promises = [];
+    Object.keys(debounceTimersRef.current).forEach((qId) => {
+      clearTimeout(debounceTimersRef.current[qId]);
+      const optionIdx = answersRef.current[qId];
+      if (optionIdx !== undefined) {
+        promises.push(
+          api(`/api/attempts/${attemptId}/answer`, {
+            method: 'POST',
+            body: { question_id: qId, selected_option: optionIdx }
+          }).catch(err => console.error('Error flushing auto-save:', err))
+        );
+      }
+    });
+    debounceTimersRef.current = {};
+    if (promises.length > 0) {
+      try {
+        await Promise.all(promises);
+      } catch (err) {
+        console.error('Error flushing answers during submit:', err);
+      }
+    }
+
+    try {
+      await api(`/api/attempts/${attemptId}/submit?auto=${isAuto}`, { method: 'POST' });
+      navigate(`/student/result/${attemptId}`, { replace: true });
+    } catch (err) {
+      setError(err.message || 'Submission failed');
+      setSubmitting(false);
+    }
+  };
+
+  const handleManualSubmit = () => {
+    setShowSubmitConfirm(true);
+  };
+
+  const handleAutoSubmit = () => {
+    submitExam(true);
+  };
+
+  const formatTime = (secs) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
+
+  if (loading) {
+    return (
+      <div className="page-loader">
+        <div className="loader-spinner" />
+      </div>
+    );
+  }
+
+  const currentQuestion = questions[currentIdx];
+
+  return (
+    <div className="app-container">
+      <div className="container" style={{ paddingBottom: 48 }}>
+        <header className="exam-header">
+          <div>
+            <h3>{attempt?.exams?.title}</h3>
+            <span style={{ fontSize: '0.85rem', opacity: 0.8 }}>Active Session</span>
+          </div>
+          <div className={`exam-timer ${timeLeft < 120 ? 'warning' : ''}`}>
+            <Clock size={18} />
+            {formatTime(timeLeft)}
+          </div>
+        </header>
+
+        {(violations > 0 || hookViolationCount > 0) && (
+          <div className="violation-banner">
+            <AlertTriangle size={20} />
+            <span>
+              Security warning: <strong>{hookViolationCount}</strong> violation(s) detected. All activities are monitored in real-time.
+            </span>
+          </div>
+        )}
+
+        <ViolationModal
+          isOpen={showWarningModal}
+          onClose={() => {
+            setShowWarningModal(false);
+            const elem = document.documentElement;
+            if (elem.requestFullscreen) {
+              elem.requestFullscreen().catch(() => {});
+            } else if (elem.webkitRequestFullscreen) {
+              elem.webkitRequestFullscreen().catch(() => {});
+            } else if (elem.msRequestFullscreen) {
+              elem.msRequestFullscreen().catch(() => {});
+            }
+          }}
+          message={warningMessage}
+          isFinal={isFinalWarning}
+          violationCount={hookViolationCount}
+        />
+
+        {showSubmitConfirm && (
+          <div className="modal-overlay" style={{ display: 'flex' }}>
+            <div className="modal-content" style={{ maxWidth: 450, padding: 32, textAlign: 'center' }}>
+              <div style={{
+                width: 64, height: 64, background: 'rgba(34, 197, 94, 0.1)', color: '#22C55E',
+                borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px', fontSize: 28
+              }}>
+                ✓
+              </div>
+              <h3 style={{ marginBottom: 12 }}>Submit Examination?</h3>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: 24, fontSize: '0.95rem', lineHeight: 1.5 }}>
+                Are you sure you want to finish and submit your exam? You cannot modify your answers or return to the exam after this.
+              </p>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ flex: 1 }}
+                  onClick={() => setShowSubmitConfirm(false)}
+                  id="confirm-submit-cancel"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-primary"
+                  style={{ flex: 1, background: '#22C55E' }}
+                  onClick={() => {
+                    setShowSubmitConfirm(false);
+                    submitExam(false);
+                  }}
+                  id="confirm-submit-button"
+                >
+                  Yes, Submit
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {error && <div className="auth-error">{error}</div>}
+
+        {questions.length > 0 && currentQuestion && (
+          <div className="exam-body-grid">
+            <main className="question-panel" style={{ position: 'relative' }}>
+              {isPaused && (
+                <div className="paused-screen-overlay">
+                  <PauseCircle size={64} className="pulse-dot" />
+                  <div className="paused-text">Examination Paused by Admin</div>
+                  <p style={{ color: 'var(--text-secondary)', marginTop: 8 }}>Please wait for the proctor to resume your session.</p>
+                </div>
+              )}
+              <div className="question-text">
+                <span style={{ color: 'var(--primary)', marginRight: 10 }}>
+                  Question {currentIdx + 1} of {questions.length}
+                </span>
+                <p style={{ marginTop: 12 }}>{currentQuestion.question_text}</p>
+              </div>
+
+              <div className="options-list">
+                {currentQuestion.options.map((option, i) => (
+                  <button
+                    key={i}
+                    className={`option-btn ${answers[currentQuestion.id] === i ? 'selected' : ''}`}
+                    onClick={() => handleSelectOption(i)}
+                  >
+                    <span className="option-letter">{String.fromCharCode(65 + i)}</span>
+                    <span>{option}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 40 }}>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setCurrentIdx((p) => Math.max(0, p - 1))}
+                  disabled={currentIdx === 0}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                >
+                  <ChevronLeft size={16} />
+                  Previous
+                </button>
+
+                {currentIdx < questions.length - 1 ? (
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setCurrentIdx((p) => p + 1)}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    Next
+                    <ChevronRight size={16} />
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleManualSubmit}
+                    disabled={submitting}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#22C55E', boxShadow: 'none' }}
+                  >
+                    <Send size={16} />
+                    Finish Exam
+                  </button>
+                )}
+              </div>
+            </main>
+
+            <aside className="exam-nav-panel">
+              <h4 style={{ marginBottom: 16 }}>Overview</h4>
+              <div className="q-grid">
+                {questions.map((q, idx) => {
+                  const answered = answers[q.id] !== undefined;
+                  const active = idx === currentIdx;
+                  return (
+                    <button
+                      key={q.id}
+                      className={`q-badge ${active ? 'active' : ''} ${answered && !active ? 'answered' : ''}`}
+                      onClick={() => setCurrentIdx(idx)}
+                    >
+                      {idx + 1}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 12, height: 12, borderRadius: 2, background: 'var(--primary)' }} />
+                  Current Question
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 12, height: 12, borderRadius: 2, background: 'var(--light-blue)', border: '1px solid var(--primary)' }} />
+                  Answered
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ width: 12, height: 12, borderRadius: 2, border: '1px solid var(--border-light)' }} />
+                  Unanswered
+                </div>
+              </div>
+            </aside>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
