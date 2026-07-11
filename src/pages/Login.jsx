@@ -143,61 +143,6 @@ export default function Login() {
             </button>
           </div>
 
-          <div style={{
-            display: 'flex', gap: 12, marginTop: 20,
-            borderTop: '1px solid var(--border-light)', paddingTop: 20
-          }}>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              style={{ flex: 1, fontSize: '0.85rem' }}
-              disabled={submitting}
-              onClick={async () => {
-                logout();
-                setEmail('student@saec.ac.in');
-                setPassword('pass123');
-                setError('');
-                setSuccessMsg('');
-                setShowReset(false);
-                setSubmitting(true);
-                try {
-                  const user = await login('student@saec.ac.in', 'pass123');
-                  navigate(user.role === 'admin' ? '/admin' : '/student');
-                } catch (err) {
-                  setError(err.message || 'Login failed');
-                } finally {
-                  setSubmitting(false);
-                }
-              }}
-            >
-              👨‍🎓 Student Demo
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              style={{ flex: 1, fontSize: '0.85rem' }}
-              disabled={submitting}
-              onClick={async () => {
-                logout();
-                setEmail('admin@saec.ac.in');
-                setPassword('admin123');
-                setError('');
-                setSuccessMsg('');
-                setShowReset(false);
-                setSubmitting(true);
-                try {
-                  const user = await login('admin@saec.ac.in', 'admin123');
-                  navigate(user.role === 'admin' ? '/admin' : '/student');
-                } catch (err) {
-                  setError(err.message || 'Login failed');
-                } finally {
-                  setSubmitting(false);
-                }
-              }}
-            >
-              🔑 Admin Demo
-            </button>
-          </div>
 
           <div className="auth-footer">
             Don't have an account? <Link to="/register">Register here</Link>
