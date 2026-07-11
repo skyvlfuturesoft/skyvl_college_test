@@ -33,8 +33,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+try:
+    os.makedirs("uploads", exist_ok=True)
+except Exception:
+    try:
+        os.makedirs("/tmp/uploads", exist_ok=True)
+    except Exception:
+        pass
+
+try:
+    if os.path.exists("uploads"):
+        app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+    else:
+        app.mount("/uploads", StaticFiles(directory="/tmp"), name="uploads")
+except Exception:
+    pass
 
 import uuid
 
