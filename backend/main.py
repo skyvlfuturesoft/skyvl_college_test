@@ -39,7 +39,8 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 import uuid
 
 # ── Supabase Credentials & Fallback Detection ──
-IS_MOCK_MODE = not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_SERVICE_KEY
+IS_MOCK_MODE = os.getenv("IS_MOCK_MODE", "true").lower() in ("true", "1", "yes") or not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_SERVICE_KEY
+
 
 # ── Mock Database Store (For Offline / Localhost Running) ──
 class MockDB:
@@ -132,7 +133,7 @@ class MockQueryBuilder:
 
     # ── Builder Methods (always return self) ──
 
-    def select(self, select_str="*"):
+    def select(self, select_str="*", **kwargs):
         self._op = 'select'
         return self
 
@@ -452,12 +453,27 @@ async def get_current_user(authorization: str = Header(...)):
         
         user = user_response.user
         # Get profile with role
-        profile = sb.table("profiles").select("*").eq("id", str(user.id)).single().execute()
+        profile_res = sb.table("profiles").select("*").eq("id", str(user.id)).execute()
+        if not profile_res.data:
+            metadata = getattr(user, 'user_metadata', None) or {}
+            name = metadata.get("name", user.email.split("@")[0])
+            role = metadata.get("role", "student")
+            sb_service = get_supabase()
+            profile_insert = sb_service.table("profiles").insert({
+                "id": str(user.id),
+                "name": name,
+                "email": user.email,
+                "role": role
+            }).execute()
+            profile_data = profile_insert.data[0] if (profile_insert and profile_insert.data) else {"role": role, "name": name}
+        else:
+            profile_data = profile_res.data[0]
+
         return {
             "id": str(user.id),
             "email": user.email,
-            "role": profile.data.get("role", "student") if profile.data else "student",
-            "name": profile.data.get("name", "") if profile.data else "",
+            "role": profile_data.get("role", "student"),
+            "name": profile_data.get("name", ""),
             "token": token,
         }
     except Exception as e:
@@ -631,9 +647,22 @@ async def login(data: LoginInput):
         })
         if result.user and result.session:
             # Get role from profiles
-            profile = sb.table("profiles").select("role, name").eq("id", str(result.user.id)).single().execute()
-            role = profile.data.get("role", "student") if profile.data else "student"
-            name = profile.data.get("name", "") if profile.data else ""
+            profile_res = sb.table("profiles").select("role, name").eq("id", str(result.user.id)).execute()
+            if not profile_res.data:
+                metadata = getattr(result.user, 'user_metadata', None) or {}
+                role = metadata.get("role", "student")
+                name = metadata.get("name", result.user.email.split("@")[0])
+                sb_service = get_supabase()
+                sb_service.table("profiles").insert({
+                    "id": str(result.user.id),
+                    "name": name,
+                    "email": result.user.email,
+                    "role": role
+                }).execute()
+            else:
+                role = profile_res.data[0].get("role", "student")
+                name = profile_res.data[0].get("name", "")
+
             return {
                 "user": {
                     "id": str(result.user.id),
@@ -1820,6 +1849,13 @@ async def session_heartbeat(data: SessionHeartbeat, user=Depends(get_current_use
 # ── Mangum Serverless Adapter ──
 from mangum import Mangum
 handler = Mangum(app)
+
+# ── Firebase Functions Adapter ──
+try:
+    from firebase_functions import https_fn
+    api = https_fn.on_request(app)
+except ImportError:
+    pass
 
 # ── Run ──
 if __name__ == "__main__":

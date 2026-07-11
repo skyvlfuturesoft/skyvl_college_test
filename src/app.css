@@ -548,3 +548,78 @@
   font-size: 0.75rem;
   font-weight: 600;
 }
+
+/* ===================================================================
+   Mobile Responsiveness Enhancements (max-width: 768px)
+   =================================================================== */
+@media (max-width: 768px) {
+  .dashboard-grid {
+    gap: 16px;
+    padding: 16px 0;
+  }
+
+  .dashboard-content {
+    padding: 20px 16px;
+    border-radius: var(--radius-md);
+  }
+
+  .dashboard-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin-bottom: 24px;
+    text-align: center;
+  }
+
+  .exam-list-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .exam-item-card {
+    padding: 16px;
+  }
+
+  .auth-card {
+    padding: 24px 16px;
+    border-radius: var(--radius-md);
+  }
+
+  .auth-header h2 {
+    font-size: 1.5rem;
+  }
+
+  /* Responsive header rows for dashboards */
+  .dashboard-header-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+    text-align: center;
+  }
+
+  .admin-table th, .admin-table td {
+    padding: 10px 12px;
+    font-size: 0.85rem;
+  }
+
+  /* Handle option selection button layout in exam page */
+  .options-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .option-btn {
+    padding: 12px 14px;
+    font-size: 0.9rem;
+  }
+
+  .exam-header {
+    padding: 12px 16px;
+  }
+
+  .question-panel {
+    padding: 20px 16px;
+  }
+}
+
