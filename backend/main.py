@@ -1884,17 +1884,9 @@ async def session_heartbeat(data: SessionHeartbeat, user=Depends(get_current_use
 
 # ── Mangum Serverless Adapter ──
 from mangum import Mangum
-handler = Mangum(app)
-
-# ── Firebase Functions Adapter ──
-try:
-    from firebase_functions import https_fn
-    api = https_fn.on_request(app)
-except ImportError:
-    pass
+handler = Mangum(app, lifespan="off")
 
 # ── Run ──
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
