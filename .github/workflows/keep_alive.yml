@@ -1,0 +1,21 @@
+name: Keep Alive Pinger
+
+on:
+  schedule:
+    # Trigger every 10 minutes (Render's timeout is 15 minutes)
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Allows manual run from GitHub interface
+
+jobs:
+  keep-alive:
+    name: Ping Services to Prevent Sleeping
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Backend Server
+        run: |
+          echo "Pinging FastAPI Backend..."
+          curl -I -s -o /dev/null -w "%{http_code}" https://skyvl-college-test.onrender.com/api/health
+      - name: Ping Frontend Server
+        run: |
+          echo "Pinging Vite Frontend..."
+          curl -I -s -o /dev/null -w "%{http_code}" https://skyvl-college-test.vercel.app/
