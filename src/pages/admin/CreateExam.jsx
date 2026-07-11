@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, API_URL } from '../../lib/api';
 import { useAuth } from '../../context/AuthContext';
 import { ArrowLeft, Plus, Trash2, Check } from 'lucide-react';
 import '../../app.css';
@@ -80,7 +80,6 @@ export default function CreateExam() {
       formData.append('file', file);
 
       try {
-        const API_URL = import.meta.env.VITE_API_URL || '';
         const token = JSON.parse(localStorage.getItem('soems_session') || '{}').access_token;
         const res = await fetch(`${API_URL}/api/admin/exams/parse-questions`, {
           method: 'POST',
