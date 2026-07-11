@@ -1,4 +1,9 @@
-export const API_URL = import.meta.env.VITE_API_URL || '';
+// Backend URL — uses VITE_API_URL env var if set, otherwise auto-detects environment
+export const API_URL = import.meta.env.VITE_API_URL !== undefined && import.meta.env.VITE_API_URL !== ''
+  ? import.meta.env.VITE_API_URL
+  : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? 'http://localhost:8000'
+      : 'https://skyvl-college-test.onrender.com');
 
 function getToken() {
   const session = JSON.parse(localStorage.getItem('soems_session') || '{}');
