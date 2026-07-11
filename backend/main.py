@@ -1090,6 +1090,16 @@ async def recent_events(limit: int = 50, user=Depends(require_admin)):
 @app.get("/api/monitor/stats")
 async def monitor_stats(user=Depends(require_admin)):
     sb = get_supabase()
+    
+    # Try calling the optimized database function to reduce latency (1 query instead of 5 sequential)
+    try:
+        if not IS_MOCK_MODE:
+            stats_res = sb.rpc("get_dashboard_stats").execute()
+            if stats_res.data:
+                return stats_res.data
+    except Exception as e:
+        print(f"get_dashboard_stats RPC failed: {str(e)}. Falling back to sequential queries.")
+        
     students = sb.table("profiles").select("id", count="exact").eq("role", "student").execute()
     exams = sb.table("exams").select("id", count="exact").execute()
     active = sb.table("attempts").select("id", count="exact").eq("status", "in_progress").execute()

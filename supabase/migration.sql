@@ -208,3 +208,23 @@ CREATE POLICY "Admins can read all events" ON event_logs
 ALTER PUBLICATION supabase_realtime ADD TABLE attempts;
 ALTER PUBLICATION supabase_realtime ADD TABLE event_logs;
 ALTER PUBLICATION supabase_realtime ADD TABLE answers;
+
+-- ============================================================
+-- DASHBOARD STATS RPC
+-- ============================================================
+CREATE OR REPLACE FUNCTION get_dashboard_stats()
+RETURNS JSON AS $$
+DECLARE
+  result JSON;
+BEGIN
+  SELECT json_build_object(
+    'total_students', (SELECT COUNT(*) FROM profiles WHERE role = 'student'),
+    'total_exams', (SELECT COUNT(*) FROM exams),
+    'active_attempts', (SELECT COUNT(*) FROM attempts WHERE status = 'in_progress'),
+    'completed_attempts', (SELECT COUNT(*) FROM attempts WHERE status IN ('submitted', 'auto_submitted')),
+    'total_violations', (SELECT COUNT(*) FROM event_logs WHERE event_type IN ('tab_switch', 'window_blur', 'violation'))
+  ) INTO result;
+  RETURN result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
