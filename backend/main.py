@@ -9,7 +9,6 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Header, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from supabase import create_client, Client
 from jose import jwt
@@ -33,21 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-try:
-    os.makedirs("uploads", exist_ok=True)
-except Exception:
-    try:
-        os.makedirs("/tmp/uploads", exist_ok=True)
-    except Exception:
-        pass
-
-try:
-    if os.path.exists("uploads"):
-        app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-    else:
-        app.mount("/uploads", StaticFiles(directory="/tmp"), name="uploads")
-except Exception:
-    pass
+# File uploads are handled in-memory for serverless compatibility
 
 import uuid
 
