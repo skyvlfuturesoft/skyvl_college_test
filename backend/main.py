@@ -1877,16 +1877,207 @@ async def session_heartbeat(data: SessionHeartbeat, user=Depends(get_current_use
         if session_check.data:
             is_paused = session_check.data.get("is_paused", False)
     except Exception:
+            "live_online": online_count,
+            "warnings_today": len(violations),
+            "kicks_today": len(kicks),
+            "average_score": int(avg_score)
+        },
+        "dept_performance": dept_performance,
+        "violation_trend": violation_trend,
+        "questions_analysis": questions_analysis
+    }
+
+# ============================================================
+# EXAM QUESTIONS PARSING ENDPOINTS
+# ============================================================
+
+@app.post("/api/admin/exams/parse-questions")
+async def parse_exam_questions(file: UploadFile = File(...), user=Depends(require_admin)):
+    filename = file.filename
+    ext = os.path.splitext(filename)[1].lower()
+    
+    questions = []
+    
+    if ext in (".xlsx", ".xls"):
+        try:
+            import pandas as pd
+            df = pd.read_excel(file.file)
+            df = df.dropna(how='all')
+            for index, row in df.iterrows():
+                vals = [str(x).strip() for x in row.values]
+                if len(vals) >= 5:
+                    q_text = vals[0]
+                    options = [vals[1], vals[2], vals[3], vals[4]]
+                    
+                    correct_answer = 0
+                    if len(vals) >= 6:
+                        correct_val = vals[5].upper()
+                        if correct_val in ("B", "1", "1.0", "OPTION B"):
+                            correct_answer = 1
+                        elif correct_val in ("C", "2", "2.0", "OPTION C"):
+                            correct_answer = 2
+                        elif correct_val in ("D", "3", "3.0", "OPTION D"):
+                            correct_answer = 3
+                            
+                    marks = 1
+                    if len(vals) >= 7:
+                        try:
+                            marks = int(float(vals[6]))
+                        except:
+                            pass
+                            
+                    questions.append({
+                        "question_text": q_text,
+                        "options": options,
+                        "correct_answer": correct_answer,
+                        "marks": marks
+                    })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse Excel file: {str(e)}")
+            
+    elif ext == ".pdf":
+        try:
+            import pdfplumber
+            import re
+            
+            text = ""
+            with pdfplumber.open(file.file) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            
+            lines = text.split("\n")
+            current_q = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Skip section header and tip lines
+                if re.match(r'^\s*(?:Section|Part|Tip)\b', line, re.IGNORECASE):
+                    continue
+                
+                # Match patterns like Q1. or 1.
+                q_match = re.match(r'^(?:Q\d+|Question\s*\d+|\d+)\s*[\.\):]\s+(.*)$', line, re.IGNORECASE)
+                if q_match:
+                    if current_q and current_q["question_text"]:
+                        questions.append(current_q)
+                    current_q = {
+                        "question_text": q_match.group(1).strip(),
+                        "options": ["", "", "", ""],
+                        "correct_answer": 0,
+                        "marks": 1
+                    }
+                    continue
+                
+                if current_q:
+                    inline_opts = re.findall(r'\b([A-Da-d])\s*[\.\):\-\/]+\s*(.*?)(?=\b[A-Da-d]\s*[\.\):\-\/]+|$)', line, re.IGNORECASE)
+                    if len(inline_opts) > 1:
+                        for opt_letter, opt_val in inline_opts:
+                            opt_idx = ord(opt_letter.upper()) - ord('A')
+                            if 0 <= opt_idx < 4:
+                                current_q["options"][opt_idx] = opt_val.strip()
+                        continue
+                    
+                    opt_match = re.match(r'^\s*([A-Da-d])\s*[\.\):\-\/]+\s*(.*)$', line)
+                    if opt_match:
+                        opt_letter = opt_match.group(1).upper()
+                        opt_idx = ord(opt_letter) - ord('A')
+                        current_q["options"][opt_idx] = opt_match.group(2).strip()
+                        continue
+                    
+                    ans_match = re.search(r'(?:correct\s+answer|correct\s+option|answer|correct|key)\s*(?:is)?\s*[:=\s\-]*\s*\b([A-D])\b', line, re.IGNORECASE)
+                    if ans_match:
+                        ans_letter = ans_match.group(1).upper()
+                        current_q["correct_answer"] = ord(ans_letter) - ord('A')
+                        continue
+                    
+                    if not any(current_q["options"]):
+                        current_q["question_text"] += " " + line
+                    else:
+                        filled_indices = [i for i, opt in enumerate(current_q["options"]) if opt]
+                        if filled_indices:
+                            last_idx = filled_indices[-1]
+                            current_q["options"][last_idx] += " " + line
+            
+            if current_q and current_q["question_text"]:
+                questions.append(current_q)
+                
+            # Fallback options parser and auto-fill loops
+            for q in questions:
+                if not any(q["options"]):
+                    opt_match = re.search(r'\s*\((?:Options|Opt|Choices)\s*[:\-]*\s*([^)]+)\)', q["question_text"], re.IGNORECASE)
+                    if not opt_match:
+                        opt_match = re.search(r'\s*\[(?:Options|Opt|Choices)\s*[:\-]*\s*([^\]]+)\]', q["question_text"], re.IGNORECASE)
+                    if opt_match:
+                        opts_str = opt_match.group(1)
+                        parsed_opts = [o.strip() for o in re.split(r'[/,;]', opts_str) if o.strip()]
+                        for idx, val in enumerate(parsed_opts[:4]):
+                            q["options"][idx] = val
+                        q["question_text"] = q["question_text"].replace(opt_match.group(0), "").strip()
+                
+                # Fill any missing choices with standard placeholders so validation doesn't block submit
+                for idx in range(4):
+                    if not q["options"][idx]:
+                        q["options"][idx] = f"Option {chr(65 + idx)}"
+                        
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse PDF file: {str(e)}")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file format. Please upload Excel (.xlsx, .xls) or PDF (.pdf) files.")
+        
+    return {"success": True, "questions": questions}
+
+@app.post("/api/session/heartbeat")
+async def session_heartbeat(data: SessionHeartbeat, user=Depends(get_current_user)):
+    sb = get_supabase()
+    
+    # Check attempt status first
+    attempt_res = sb.table("attempts").select("status").eq("id", data.attempt_id).single().execute()
+    if attempt_res.data:
+        attempt_status = attempt_res.data.get("status")
+        if attempt_status in ("terminated", "submitted", "auto_submitted"):
+            try:
+                sb.table("live_sessions").delete().eq("attempt_id", data.attempt_id).execute()
+            except Exception:
+                pass
+            return {"status": attempt_status, "is_paused": False}
+
+    session_data = {
+        "attempt_id": data.attempt_id,
+        "student_id": user["id"],
+        "current_question_index": data.current_question_index,
+        "answered_count": data.answered_count,
+        "time_remaining": data.time_remaining,
+        "browser": data.browser,
+        "os": data.os,
+        "ip_address": data.ip_address,
+        "connection_status": data.connection_status,
+        "is_paused": data.is_paused,
+        "last_heartbeat": datetime.now(timezone.utc).isoformat()
+    }
+    
+    # Upsert live session (mock stores by attempt_id key)
+    try:
+        existing = sb.table("live_sessions").select("id").eq("attempt_id", data.attempt_id).execute()
+        if existing.data:
+            sb.table("live_sessions").update(session_data).eq("attempt_id", data.attempt_id).execute()
+        else:
+            sb.table("live_sessions").insert(session_data).execute()
+            
+        session_check = sb.table("live_sessions").select("is_paused").eq("attempt_id", data.attempt_id).single().execute()
+        is_paused = False
+        if session_check.data:
+            is_paused = session_check.data.get("is_paused", False)
+    except Exception:
         is_paused = False
         
     return {"status": "alive", "is_paused": is_paused}
 
 
-# ── Mangum Serverless Adapter ──
-from mangum import Mangum
-handler = Mangum(app, lifespan="off")
-
-# ── Run ──
+# ── Local Dev Server ──
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
