@@ -452,13 +452,13 @@ async def get_current_user(authorization: str = Header(...)):
             raise HTTPException(status_code=401, detail="Invalid token")
         
         user = user_response.user
-        # Get profile with role
-        profile_res = sb.table("profiles").select("*").eq("id", str(user.id)).execute()
+        # Get profile with role using service role client to bypass RLS in backend auth checks
+        sb_service = get_supabase()
+        profile_res = sb_service.table("profiles").select("*").eq("id", str(user.id)).execute()
         if not profile_res.data:
             metadata = getattr(user, 'user_metadata', None) or {}
             name = metadata.get("name", user.email.split("@")[0])
             role = metadata.get("role", "student")
-            sb_service = get_supabase()
             profile_insert = sb_service.table("profiles").insert({
                 "id": str(user.id),
                 "name": name,
@@ -646,13 +646,13 @@ async def login(data: LoginInput):
             "password": data.password
         })
         if result.user and result.session:
-            # Get role from profiles
-            profile_res = sb.table("profiles").select("role, name").eq("id", str(result.user.id)).execute()
+            # Get role from profiles using service role client to bypass RLS in backend login
+            sb_service = get_supabase()
+            profile_res = sb_service.table("profiles").select("role, name").eq("id", str(result.user.id)).execute()
             if not profile_res.data:
                 metadata = getattr(result.user, 'user_metadata', None) or {}
                 role = metadata.get("role", "student")
                 name = metadata.get("name", result.user.email.split("@")[0])
-                sb_service = get_supabase()
                 sb_service.table("profiles").insert({
                     "id": str(result.user.id),
                     "name": name,
