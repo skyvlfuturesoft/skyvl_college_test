@@ -52,10 +52,7 @@ export default function ViewResults() {
         ];
       });
     } else {
-      fileName = `exam_results_template.csv`;
-      rows = [
-        ['John Doe', 'john@example.com', 'Sample Exam', '80', '100', '80%', '0', new Date().toLocaleString(), 'completed']
-      ];
+      fileName = `exam_results_empty.csv`;
     }
     
     const csvContent = [
