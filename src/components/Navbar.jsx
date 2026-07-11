@@ -77,6 +77,14 @@ export default function Navbar() {
             {link.label}
           </a>
         ))}
+        <Link 
+          to="/login" 
+          className="btn btn-primary" 
+          style={{ marginTop: '20px', padding: '12px 32px', fontSize: '1.05rem', fontWeight: 600 }}
+          onClick={() => setMobileOpen(false)}
+        >
+          Live Portal
+        </Link>
       </div>
     </>
   );
