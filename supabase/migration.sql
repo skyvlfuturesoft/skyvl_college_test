@@ -228,3 +228,16 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- ============================================================
+-- PERFORMANCE INDEXES
+-- ============================================================
+CREATE INDEX IF NOT EXISTS idx_attempts_student_id ON attempts(student_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_exam_id ON attempts(exam_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status);
+CREATE INDEX IF NOT EXISTS idx_questions_exam_id ON questions(exam_id);
+CREATE INDEX IF NOT EXISTS idx_answers_attempt_id ON answers(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_event_logs_attempt_id ON event_logs(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_event_logs_user_id ON event_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_event_logs_event_type ON event_logs(event_type);
+
+
