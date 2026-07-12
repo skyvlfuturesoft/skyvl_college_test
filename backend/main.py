@@ -404,18 +404,27 @@ class MockSupabaseClient:
 
 
 
+_supabase_client = None
+_public_supabase_client = None
+
 # ── Supabase Clients ──
 def get_supabase() -> Client:
     """Service role client for backend operations."""
+    global _supabase_client
     if IS_MOCK_MODE:
         return MockSupabaseClient()
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    if _supabase_client is None:
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    return _supabase_client
 
 def get_public_supabase() -> Client:
     """Anon client for user-scoped operations."""
+    global _public_supabase_client
     if IS_MOCK_MODE:
         return MockSupabaseClient()
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    if _public_supabase_client is None:
+        _public_supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _public_supabase_client
 
 
 
@@ -444,6 +453,28 @@ async def get_current_user(authorization: str = Header(...)):
                 pass
             raise HTTPException(status_code=401, detail="Invalid mock session token")
             
+        # Try local JWT verification (0 network calls)
+        if JWT_SECRET:
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
+                user_id = payload.get("sub")
+                email = payload.get("email")
+                user_metadata = payload.get("user_metadata") or {}
+                role = user_metadata.get("role")
+                name = user_metadata.get("name", email.split("@")[0] if email else "User")
+                
+                if user_id and email and role:
+                    return {
+                        "id": user_id,
+                        "email": email,
+                        "role": role,
+                        "name": name,
+                        "token": token,
+                    }
+            except Exception:
+                pass
+
+        # Fallback to Supabase API verification (network calls) if local verification fails or secret is missing
         sb = get_public_supabase()
         user_response = sb.auth.get_user(token)
         if not user_response or not user_response.user:
