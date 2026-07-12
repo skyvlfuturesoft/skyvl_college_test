@@ -11,18 +11,16 @@ export function useAuth() {
 }
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    // Restore session from localStorage
-    const savedUser = localStorage.getItem('soems_user');
-    const savedSession = localStorage.getItem('soems_session');
-    if (savedUser && savedSession) {
-      setUser(JSON.parse(savedUser));
+  const [user, setUser] = useState(() => {
+    try {
+      const savedUser = localStorage.getItem('soems_user');
+      const savedSession = localStorage.getItem('soems_session');
+      return (savedUser && savedSession) ? JSON.parse(savedUser) : null;
+    } catch (e) {
+      return null;
     }
-    setLoading(false);
-  }, []);
+  });
+  const [loading, setLoading] = useState(false);
 
   const login = async (email, password) => {
     const data = await api('/api/auth/login', {
