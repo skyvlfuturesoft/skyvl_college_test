@@ -1,6 +1,7 @@
 """
 SOEMS — FastAPI Backend
 Secure Online Examination Management System
+v1.1.0 — Supabase exam-images storage bucket enabled
 """
 
 import os
