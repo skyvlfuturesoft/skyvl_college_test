@@ -31,7 +31,7 @@ export default function ExamPage() {
       try {
         const attemptData = await api(`/api/attempts/${attemptId}`);
         if (attemptData.attempt.status === 'terminated') {
-          navigate(`/student/exam-terminated?reason=${encodeURIComponent('This exam session has been terminated due to security violations.')}`, { replace: true });
+          navigate(`/student/exam-terminated?attempt_id=${attemptId}&reason=${encodeURIComponent('This exam session has been terminated due to security violations.')}`, { replace: true });
           return;
         }
         if (attemptData.attempt.status !== 'in_progress') {
@@ -57,7 +57,11 @@ export default function ExamPage() {
         const resultData = await api(`/api/attempts/${attemptId}/result`);
         const savedAnswers = {};
         resultData.answers.forEach((ans) => {
-          savedAnswers[ans.question_id] = ans.selected_option;
+          if (ans.selected_option !== null && ans.selected_option !== undefined) {
+            savedAnswers[ans.question_id] = ans.selected_option;
+          } else if (ans.selected_answer_text !== null && ans.selected_answer_text !== undefined) {
+            savedAnswers[ans.question_id] = ans.selected_answer_text;
+          }
         });
         setAnswers(savedAnswers);
       } catch (err) {
@@ -97,41 +101,80 @@ export default function ExamPage() {
     return () => clearInterval(timerRef.current);
   }, [loading, timeLeft, submitting, isPaused]);
 
-  const answersRef = useRef(answers);
-  const debounceTimersRef = useRef({});
+  const dirtyAnswersRef = useRef({});
+  const savingRef = useRef(false);
 
-  useEffect(() => {
-    answersRef.current = answers;
-  }, [answers]);
+  const handleSelectOptionText = (qId, value) => {
+    setAnswers((prev) => ({ ...prev, [qId]: value }));
+    dirtyAnswersRef.current[qId] = value;
+  };
 
-  const handleSelectOption = (optionIdx) => {
-    const q = questions[currentIdx];
-    const updated = { ...answers, [q.id]: optionIdx };
-    setAnswers(updated);
+  const saveDirtyAnswers = async () => {
+    const dirty = { ...dirtyAnswersRef.current };
+    if (Object.keys(dirty).length === 0 || savingRef.current) return;
+    
+    savingRef.current = true;
+    dirtyAnswersRef.current = {};
+    
+    try {
+      const promises = Object.entries(dirty).map(async ([qId, val]) => {
+        let retries = 3;
+        let success = false;
+        const isMcq = typeof val === 'number';
+        const bodyPayload = {
+          question_id: qId,
+          selected_option: isMcq ? val : null,
+          selected_answer_text: isMcq ? null : val
+        };
 
-    if (debounceTimersRef.current[q.id]) {
-      clearTimeout(debounceTimersRef.current[q.id]);
-    }
-
-    debounceTimersRef.current[q.id] = setTimeout(async () => {
-      try {
-        await api(`/api/attempts/${attemptId}/answer`, {
-          method: 'POST',
-          body: { question_id: q.id, selected_option: optionIdx }
-        });
+        while (retries > 0 && !success) {
+          try {
+            await api(`/api/attempts/${attemptId}/answer`, {
+              method: 'POST',
+              body: bodyPayload
+            });
+            success = true;
+          } catch (err) {
+            retries--;
+            if (retries === 0) throw err;
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
         
         await api('/api/events/log', {
           method: 'POST',
           body: {
             attempt_id: attemptId,
             event_type: 'answer_saved',
-            details: { question_id: q.id, option_index: optionIdx }
+            details: { question_id: qId, option_index: isMcq ? val : null, answer_text: isMcq ? null : val }
           }
         });
-      } catch (err) {
-        console.error('Failed to save answer:', err);
-      }
-    }, 750);
+      });
+      
+      await Promise.all(promises);
+    } catch (err) {
+      console.error('Failed to save answers, restoring dirty answers state:', err);
+      Object.entries(dirty).forEach(([qId, val]) => {
+        if (dirtyAnswersRef.current[qId] === undefined) {
+          dirtyAnswersRef.current[qId] = val;
+        }
+      });
+    } finally {
+      savingRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    const autoSaveTimer = setInterval(() => {
+      saveDirtyAnswers();
+    }, 30000);
+    return () => clearInterval(autoSaveTimer);
+  }, []);
+
+  const handleSelectOption = (optionIdx) => {
+    const q = questions[currentIdx];
+    setAnswers((prev) => ({ ...prev, [q.id]: optionIdx }));
+    dirtyAnswersRef.current[q.id] = optionIdx;
   };
 
   const submitExam = async (isAuto = false) => {
@@ -139,28 +182,8 @@ export default function ExamPage() {
     setSubmitting(true);
     clearInterval(timerRef.current);
 
-    // Flush any pending debounced auto-saves
-    const promises = [];
-    Object.keys(debounceTimersRef.current).forEach((qId) => {
-      clearTimeout(debounceTimersRef.current[qId]);
-      const optionIdx = answersRef.current[qId];
-      if (optionIdx !== undefined) {
-        promises.push(
-          api(`/api/attempts/${attemptId}/answer`, {
-            method: 'POST',
-            body: { question_id: qId, selected_option: optionIdx }
-          }).catch(err => console.error('Error flushing auto-save:', err))
-        );
-      }
-    });
-    debounceTimersRef.current = {};
-    if (promises.length > 0) {
-      try {
-        await Promise.all(promises);
-      } catch (err) {
-        console.error('Error flushing answers during submit:', err);
-      }
-    }
+    // Flush remaining dirty answers
+    await saveDirtyAnswers();
 
     try {
       await api(`/api/attempts/${attemptId}/submit?auto=${isAuto}`, { method: 'POST' });
@@ -291,26 +314,67 @@ export default function ExamPage() {
                 <span style={{ color: 'var(--primary)', marginRight: 10 }}>
                   Question {currentIdx + 1} of {questions.length}
                 </span>
+                {currentQuestion.image_url && (
+                  <div style={{ margin: '16px 0', textAlign: 'center' }}>
+                    <img
+                      src={currentQuestion.image_url}
+                      alt="Question Context"
+                      style={{ maxWidth: '100%', maxHeight: '250px', borderRadius: '8px', border: '1px solid var(--border-light)' }}
+                    />
+                  </div>
+                )}
                 <p style={{ marginTop: 12 }}>{currentQuestion.question_text}</p>
               </div>
 
-              <div className="options-list">
-                {currentQuestion.options.map((option, i) => (
-                  <button
-                    key={i}
-                    className={`option-btn ${answers[currentQuestion.id] === i ? 'selected' : ''}`}
-                    onClick={() => handleSelectOption(i)}
-                  >
-                    <span className="option-letter">{String.fromCharCode(65 + i)}</span>
-                    <span>{option}</span>
-                  </button>
-                ))}
-              </div>
+              {/* Render either option buttons or fill text field */}
+              {(currentQuestion.question_type === 'mcq' || currentQuestion.question_type === 'image_mcq' || !currentQuestion.question_type) ? (
+                <div className="options-list">
+                  {currentQuestion.options.map((option, i) => (
+                    <button
+                      key={i}
+                      className={`option-btn ${answers[currentQuestion.id] === i ? 'selected' : ''}`}
+                      onClick={() => handleSelectOption(i)}
+                    >
+                      <span className="option-letter">{String.fromCharCode(65 + i)}</span>
+                      <span>{option}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ marginTop: 24, padding: '0 8px' }}>
+                  <label style={{ display: 'block', fontWeight: 600, marginBottom: 12, color: 'var(--text)' }}>
+                    Type your answer:
+                  </label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Enter correct answer here..."
+                    value={answers[currentQuestion.id] || ''}
+                    onChange={(e) => handleSelectOptionText(currentQuestion.id, e.target.value)}
+                    style={{
+                      width: '100%',
+                      maxWidth: '500px',
+                      padding: '12px 16px',
+                      borderRadius: 8,
+                      border: '1.5px solid var(--border-light)',
+                      fontSize: '1rem',
+                      background: '#FFFFFF',
+                      outline: 'none'
+                    }}
+                  />
+                  <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: 8 }}>
+                    * Answer evaluation is case-insensitive.
+                  </p>
+                </div>
+              )}
 
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 40 }}>
                 <button
                   className="btn btn-secondary"
-                  onClick={() => setCurrentIdx((p) => Math.max(0, p - 1))}
+                  onClick={async () => {
+                    await saveDirtyAnswers();
+                    setCurrentIdx((p) => Math.max(0, p - 1));
+                  }}
                   disabled={currentIdx === 0}
                   style={{ display: 'flex', alignItems: 'center', gap: 6 }}
                 >
@@ -321,7 +385,10 @@ export default function ExamPage() {
                 {currentIdx < questions.length - 1 ? (
                   <button
                     className="btn btn-secondary"
-                    onClick={() => setCurrentIdx((p) => p + 1)}
+                    onClick={async () => {
+                      await saveDirtyAnswers();
+                      setCurrentIdx((p) => p + 1);
+                    }}
                     style={{ display: 'flex', alignItems: 'center', gap: 6 }}
                   >
                     Next
@@ -330,7 +397,10 @@ export default function ExamPage() {
                 ) : (
                   <button
                     className="btn btn-primary"
-                    onClick={handleManualSubmit}
+                    onClick={async () => {
+                      await saveDirtyAnswers();
+                      handleManualSubmit();
+                    }}
                     disabled={submitting}
                     style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#22C55E', boxShadow: 'none' }}
                   >
@@ -351,7 +421,10 @@ export default function ExamPage() {
                     <button
                       key={q.id}
                       className={`q-badge ${active ? 'active' : ''} ${answered && !active ? 'answered' : ''}`}
-                      onClick={() => setCurrentIdx(idx)}
+                      onClick={async () => {
+                        await saveDirtyAnswers();
+                        setCurrentIdx(idx);
+                      }}
                     >
                       {idx + 1}
                     </button>

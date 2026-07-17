@@ -13,7 +13,7 @@ export default function ViolationModal({ isOpen, onClose, message, isFinal, viol
       setCountdown((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          onClose();
+          setTimeout(() => onClose(), 0);
           return 0;
         }
         return prev - 1;

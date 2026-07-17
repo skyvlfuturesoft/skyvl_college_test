@@ -53,6 +53,7 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
   // Heartbeat & Sync Loop
   useEffect(() => {
     let active = true;
+    let consecutiveFailures = 0;
     const meta = getProctorMetadata();
 
     const sendHeartbeat = async () => {
@@ -73,11 +74,17 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
             is_paused: isPausedRef.current
           }
         });
+        consecutiveFailures = 0; // reset on success
         if (res) {
+          // not_found = attempt was deleted or doesn't exist; stop heartbeat silently
+          if (res.status === 'not_found') {
+            active = false;
+            return;
+          }
           if (res.status === 'terminated' || res.status === 'submitted' || res.status === 'auto_submitted') {
             active = false;
             if (res.status === 'terminated') {
-              navigate(`/student/exam-terminated?reason=${encodeURIComponent('Exam session was terminated by the server.')}`, { replace: true });
+              navigate(`/student/exam-terminated?attempt_id=${attemptId}&reason=${encodeURIComponent('Exam session was terminated by the server.')}`, { replace: true });
             } else {
               navigate(`/student/result/${attemptId}`, { replace: true });
             }
@@ -88,7 +95,11 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
           }
         }
       } catch (err) {
-        console.error('Proctor heartbeat sync error:', err);
+        consecutiveFailures++;
+        // Only log the first failure — suppress repeated network error spam
+        if (consecutiveFailures === 1) {
+          console.warn('Proctor heartbeat: backend unreachable, will retry silently.');
+        }
       }
     };
 
@@ -137,7 +148,7 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
         if (res && res.kicked) {
           setShowWarningModal(false);
           // Redirect to the exam terminated page immediately with the specific reason
-          navigate(`/student/exam-terminated?reason=${encodeURIComponent(res.reason || 'Violation of exam rules')}`, { replace: true });
+          navigate(`/student/exam-terminated?attempt_id=${attemptId}&reason=${encodeURIComponent(res.reason || 'Violation of exam rules')}`, { replace: true });
           return;
         }
 
@@ -214,7 +225,7 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
       if (widthDiff > threshold || heightDiff > threshold) {
         reportViolation('devtools_open');
       }
-      if (window.screen && (window.screen.width > 2560 || (window.screen.isExtended && window.screen.isExtended === true))) {
+      if (window.screen && window.screen.isExtended === true) {
         reportViolation('multi_monitor');
       }
     };

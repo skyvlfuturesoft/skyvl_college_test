@@ -1,11 +1,39 @@
+import { useEffect } from 'react';
 import { ShieldAlert, AlertOctagon } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { api } from '../../lib/api';
 import '../../proctor.css';
 
 export default function ExamTerminated() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const attemptId = searchParams.get('attempt_id');
   const reason = searchParams.get('reason') || 'Security triggers logged tab switching, window focus loss, or developer console activity exceeding the permissible limit.';
+
+  // Poll server to check if admin has reinstated the exam attempt
+  useEffect(() => {
+    if (!attemptId) return;
+
+    let active = true;
+    const checkReinstatement = async () => {
+      try {
+        const data = await api(`/api/attempts/${attemptId}`);
+        if (active && data && data.attempt && data.attempt.status === 'in_progress') {
+          // Attempt has been reinstated! Refresh and redirect to the exam page
+          active = false;
+          navigate(`/student/exam/${attemptId}`, { replace: true });
+        }
+      } catch (err) {
+        // Silently handle polling network/auth errors
+      }
+    };
+
+    const interval = setInterval(checkReinstatement, 3000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [attemptId, navigate]);
 
   return (
     <div className="terminated-page-wrapper">

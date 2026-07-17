@@ -1,30 +1,32 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route } from 'react-router-dom';
-import Navbar from './components/Navbar';
-import Hero from './components/Hero';
-import Features from './components/Features';
-import Architecture from './components/Architecture';
-import TechStack from './components/TechStack';
-import Modules from './components/Modules';
-import Security from './components/Security';
-import Workflow from './components/Workflow';
 import ScrollToTop from './components/ScrollToTop';
 import { ProtectedRoute } from './context/AuthContext';
 
-// Pages
-import Login from './pages/Login';
-import Register from './pages/Register';
-import StudentDashboard from './pages/student/StudentDashboard';
-import ExamPage from './pages/student/ExamPage';
-import ResultPage from './pages/student/ResultPage';
-import ExamTerminated from './pages/student/ExamTerminated';
-import AdminDashboard from './pages/admin/AdminDashboard';
-import CreateExam from './pages/admin/CreateExam';
-import LiveMonitor from './pages/admin/LiveMonitor';
-import ViewResults from './pages/admin/ViewResults';
-import KickLog from './pages/admin/KickLog';
-import Analytics from './pages/admin/Analytics';
+// Pages (Lazy Loaded)
+const Login = lazy(() => import('./pages/Login'));
+const Register = lazy(() => import('./pages/Register'));
+const StudentDashboard = lazy(() => import('./pages/student/StudentDashboard'));
+const ExamPage = lazy(() => import('./pages/student/ExamPage'));
+const ResultPage = lazy(() => import('./pages/student/ResultPage'));
+const TestHistory = lazy(() => import('./pages/student/TestHistory'));
+const ExamTerminated = lazy(() => import('./pages/student/ExamTerminated'));
+const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
+const CreateExam = lazy(() => import('./pages/admin/CreateExam'));
+const LiveMonitor = lazy(() => import('./pages/admin/LiveMonitor'));
+const ViewResults = lazy(() => import('./pages/admin/ViewResults'));
+const KickLog = lazy(() => import('./pages/admin/KickLog'));
+const Analytics = lazy(() => import('./pages/admin/Analytics'));
 
+// Components (Lazy Loaded for 98%+ Performance)
+const Navbar = lazy(() => import('./components/Navbar'));
+const Hero = lazy(() => import('./components/Hero'));
+const Features = lazy(() => import('./components/Features'));
+const Architecture = lazy(() => import('./components/Architecture'));
+const TechStack = lazy(() => import('./components/TechStack'));
+const Modules = lazy(() => import('./components/Modules'));
+const Security = lazy(() => import('./components/Security'));
+const Workflow = lazy(() => import('./components/Workflow'));
 const DatabaseSection = lazy(() => import('./components/Database'));
 const Dashboard = lazy(() => import('./components/Dashboard'));
 const Screenshots = lazy(() => import('./components/Screenshots'));
@@ -32,20 +34,16 @@ const Testing = lazy(() => import('./components/Testing'));
 const FutureScope = lazy(() => import('./components/FutureScope'));
 const Footer = lazy(() => import('./components/Footer'));
 
-const SectionLoader = () => (
-  <div style={{ padding: '80px 0', textAlign: 'center', color: '#94A3B8' }}>
-    <div style={{
-      width: 32, height: 32, border: '3px solid #E3F2FD',
-      borderTopColor: '#1565C0', borderRadius: '50%',
-      animation: 'spin .6s linear infinite', margin: '0 auto 12px'
-    }} />
+const PageLoader = () => (
+  <div className="page-loader">
+    <div className="loader-spinner" />
   </div>
 );
 
 // Documentation Home Component
 function DocumentationHome() {
   return (
-    <>
+    <Suspense fallback={<PageLoader />}>
       <Navbar />
       <main>
         <Hero />
@@ -54,30 +52,18 @@ function DocumentationHome() {
         <Architecture />
         <TechStack />
         <Modules />
-        <Suspense fallback={<SectionLoader />}>
-          <DatabaseSection />
-        </Suspense>
+        <DatabaseSection />
         <Security />
         <Workflow />
-        <Suspense fallback={<SectionLoader />}>
-          <Dashboard />
-        </Suspense>
+        <Dashboard />
         <hr className="section-divider" />
-        <Suspense fallback={<SectionLoader />}>
-          <Screenshots />
-        </Suspense>
-        <Suspense fallback={<SectionLoader />}>
-          <Testing />
-        </Suspense>
-        <Suspense fallback={<SectionLoader />}>
-          <FutureScope />
-        </Suspense>
+        <Screenshots />
+        <Testing />
+        <FutureScope />
       </main>
-      <Suspense fallback={null}>
-        <Footer />
-      </Suspense>
+      <Footer />
       <ScrollToTop />
-    </>
+    </Suspense>
   );
 }
 
@@ -85,64 +71,76 @@ export default function App() {
   return (
     <>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      <Routes>
-        {/* Documentation Portal */}
-        <Route path="/" element={<DocumentationHome />} />
-        
-        {/* Authentication */}
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        
-        {/* Student Portal (Protected) */}
-        <Route path="/student" element={
-          <ProtectedRoute role="student">
-            <StudentDashboard />
-          </ProtectedRoute>
-        } />
-        <Route path="/student/exam/:attemptId" element={
-          <ProtectedRoute role="student">
-            <ExamPage />
-          </ProtectedRoute>
-        } />
-        <Route path="/student/result/:attemptId" element={
-          <ProtectedRoute role="student">
-            <ResultPage />
-          </ProtectedRoute>
-        } />
-        <Route path="/student/exam-terminated" element={<ExamTerminated />} />
-        
-        {/* Admin Portal (Protected) */}
-        <Route path="/admin" element={
-          <ProtectedRoute role="admin">
-            <AdminDashboard />
-          </ProtectedRoute>
-        } />
-        <Route path="/admin/create-exam" element={
-          <ProtectedRoute role="admin">
-            <CreateExam />
-          </ProtectedRoute>
-        } />
-        <Route path="/admin/monitor" element={
-          <ProtectedRoute role="admin">
-            <LiveMonitor />
-          </ProtectedRoute>
-        } />
-        <Route path="/admin/results" element={
-          <ProtectedRoute role="admin">
-            <ViewResults />
-          </ProtectedRoute>
-        } />
-        <Route path="/admin/kick-log" element={
-          <ProtectedRoute role="admin">
-            <KickLog />
-          </ProtectedRoute>
-        } />
-        <Route path="/admin/analytics" element={
-          <ProtectedRoute role="admin">
-            <Analytics />
-          </ProtectedRoute>
-        } />
-      </Routes>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          {/* Documentation Portal */}
+          <Route path="/" element={<DocumentationHome />} />
+          
+          {/* Authentication */}
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          
+          {/* Student Portal (Protected) */}
+          <Route path="/student" element={
+            <ProtectedRoute role="student">
+              <StudentDashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/student/exam/:attemptId" element={
+            <ProtectedRoute role="student">
+              <ExamPage />
+            </ProtectedRoute>
+          } />
+          <Route path="/student/result/:attemptId" element={
+            <ProtectedRoute role="student">
+              <ResultPage />
+            </ProtectedRoute>
+          } />
+          <Route path="/student/history" element={
+            <ProtectedRoute role="student">
+              <TestHistory />
+            </ProtectedRoute>
+          } />
+          <Route path="/student/exam-terminated" element={<ExamTerminated />} />
+          
+          {/* Admin Portal (Protected) */}
+          <Route path="/admin" element={
+            <ProtectedRoute role="admin">
+              <AdminDashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/create-exam" element={
+            <ProtectedRoute role="admin">
+              <CreateExam />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/edit-exam/:examId" element={
+            <ProtectedRoute role="admin">
+              <CreateExam />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/monitor" element={
+            <ProtectedRoute role="admin">
+              <LiveMonitor />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/results" element={
+            <ProtectedRoute role="admin">
+              <ViewResults />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/kick-log" element={
+            <ProtectedRoute role="admin">
+              <KickLog />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/analytics" element={
+            <ProtectedRoute role="admin">
+              <Analytics />
+            </ProtectedRoute>
+          } />
+        </Routes>
+      </Suspense>
     </>
   );
 }

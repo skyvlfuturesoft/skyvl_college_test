@@ -49,8 +49,18 @@ export default function AdminLiveCards() {
   };
 
   useEffect(() => {
-    loadStats();
-    const interval = setInterval(loadStats, 3000);
+    let failCount = 0;
+    const pollStats = async () => {
+      try {
+        await loadStats();
+        failCount = 0;
+      } catch (e) {
+        failCount++;
+        if (failCount === 1) console.warn('AdminLiveCards: backend unreachable, retrying silently.');
+      }
+    };
+    pollStats();
+    const interval = setInterval(pollStats, 5000);
     return () => clearInterval(interval);
   }, []);
 

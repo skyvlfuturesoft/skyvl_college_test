@@ -1,54 +1,47 @@
 @echo off
-echo =======================================================================
-echo     SOEMS - Secure Online Examination Management System Local Starter
-echo =======================================================================
+title SOEMS Local Dev Servers
+color 0A
+
+echo ============================================================
+echo   SOEMS - Secure Online Exam Management System
+echo   Starting Local Development Environment
+echo ============================================================
 echo.
 
-REM Navigate to the workspace directory safely avoiding trailing backslash quote escaping
-cd /d "%~dp0."
+:: Kill any process already using port 8010
+echo [1/4] Clearing port 8010...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8010" ^| findstr "LISTENING"') do (
+    taskkill /PID %%a /F >nul 2>&1
+)
+:: Also kill any lingering Python/node processes from previous runs
+taskkill /IM "python.exe" /F >nul 2>&1
+taskkill /IM "node.exe" /F >nul 2>&1
+timeout /t 2 /nobreak >nul
 
-if exist venv goto venv_exists
-echo [INFO] Creating Python virtual environment (venv)...
-python -m venv venv
-if errorlevel 1 goto venv_failed
-goto venv_exists
+:: Kill any process on port 5173 too
+echo [2/4] Clearing port 5173...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":5173" ^| findstr "LISTENING"') do (
+    taskkill /PID %%a /F >nul 2>&1
+)
+timeout /t 1 /nobreak >nul
 
-:venv_failed
-echo [ERROR] Failed to create virtual environment. Ensure Python is installed and in your PATH.
-pause
-exit /b 1
+echo [3/4] Starting FastAPI backend on http://127.0.0.1:8010 ...
+start "SOEMS Backend (port 8010)" cmd /k "cd /d %~dp0backend && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8010"
 
-:venv_exists
-echo [INFO] Python virtual environment exists.
+:: Wait for backend to initialise before starting frontend
+timeout /t 4 /nobreak >nul
 
-echo [INFO] Activating virtual environment and installing backend requirements...
-call venv\Scripts\activate.bat
-pip install -r backend\requirements.txt
-if errorlevel 1 goto pip_failed
-goto pip_success
+echo [4/4] Starting Vite frontend on http://localhost:5173 ...
+start "SOEMS Frontend (port 5173)" cmd /k "cd /d %~dp0 && npm run dev"
 
-:pip_failed
-echo [ERROR] Failed to install Python dependencies.
-pause
-exit /b 1
-
-:pip_success
-echo [INFO] Installing frontend dependencies (npm install)...
-call npm install
-if errorlevel 1 goto npm_failed
-goto npm_success
-
-:npm_failed
-echo [ERROR] Failed to install Node.js dependencies.
-pause
-exit /b 1
-
-:npm_success
-echo [INFO] Starting FastAPI backend server in a new window (port 8000)...
-start "SOEMS FastAPI Backend" cmd /k "call venv\Scripts\activate.bat && cd backend && uvicorn main:app --reload --host 127.0.0.1 --port 8000"
-
-echo [INFO] Starting Vite frontend dev server (port 5173)...
 echo.
-npm run dev
-
+echo ============================================================
+echo   Both servers are starting in separate windows.
+echo.
+echo   Frontend : http://localhost:5173
+echo   Backend  : http://127.0.0.1:8010
+echo   API Docs : http://127.0.0.1:8010/docs
+echo ============================================================
+echo.
+echo   Close this window any time. Servers run in their own windows.
 pause

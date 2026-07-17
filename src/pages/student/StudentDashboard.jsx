@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../lib/api';
 import { Calendar, Clock, Award, Play } from 'lucide-react';
@@ -7,29 +7,24 @@ import '../../app.css';
 
 export default function StudentDashboard() {
   const { user, logout } = useAuth();
-  const [exams, setExams] = useState([]);
-  const [attempts, setAttempts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const navigate = useNavigate();
 
-  useEffect(() => {
-    async function fetchData() {
-      try {
-        const [examsData, attemptsData] = await Promise.all([
-          api('/api/exams'),
-          api('/api/my-attempts'),
-        ]);
-        setExams(examsData.exams);
-        setAttempts(attemptsData.attempts);
-      } catch (err) {
-        setError(err.message || 'Failed to fetch dashboard data');
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchData();
-  }, []);
+  const { data: examsData, isLoading: isExamsLoading, error: examsError } = useQuery({
+    queryKey: ['studentExams'],
+    queryFn: () => api('/api/exams'),
+    staleTime: 10000,
+  });
+
+  const { data: attemptsData, isLoading: isAttemptsLoading, error: attemptsError } = useQuery({
+    queryKey: ['studentAttempts'],
+    queryFn: () => api('/api/my-attempts'),
+    staleTime: 5000,
+  });
+
+  const exams = examsData?.exams || [];
+  const attempts = attemptsData?.attempts || [];
+  const loading = isExamsLoading || isAttemptsLoading;
+  const error = examsError?.message || attemptsError?.message || '';
 
   const handleStartExam = async (examId) => {
     try {
@@ -46,14 +41,6 @@ export default function StudentDashboard() {
     return attempt;
   };
 
-  if (loading) {
-    return (
-      <div className="page-loader">
-        <div className="loader-spinner" />
-      </div>
-    );
-  }
-
   return (
     <div className="app-container">
       <div className="container">
@@ -68,7 +55,8 @@ export default function StudentDashboard() {
               <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{user.email}</div>
             </div>
             <ul className="sidebar-links">
-              <li><a href="#active" className="active">Dashboard</a></li>
+              <li><a href="#active" className="active" onClick={(e) => { e.preventDefault(); navigate('/student'); }}>Dashboard</a></li>
+              <li><a href="#history" onClick={(e) => { e.preventDefault(); navigate('/student/history'); }}>My Test History</a></li>
               <li><a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }}>Documentation</a></li>
               <li>
                 <a href="#logout" onClick={(e) => { e.preventDefault(); logout(); navigate('/login'); }} style={{ color: '#C62828' }}>
@@ -92,7 +80,31 @@ export default function StudentDashboard() {
               Available Exams
             </h3>
 
-            {exams.length === 0 ? (
+            <style>{`
+              @keyframes skeleton-pulse {
+                0%, 100% { opacity: 0.5; }
+                50% { opacity: 1; }
+              }
+              .skeleton-pulse {
+                animation: skeleton-pulse 1.5s infinite ease-in-out;
+              }
+            `}</style>
+
+            {loading ? (
+              <div className="exam-list-grid" style={{ marginBottom: 40 }}>
+                {[1, 2, 3].map((i) => (
+                  <div className="exam-item-card" key={i} style={{ minHeight: 180, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                    <div>
+                      <div className="skeleton-pulse" style={{ height: 20, width: '75%', background: 'var(--border-light)', borderRadius: 4, marginBottom: 12 }} />
+                      <div className="skeleton-pulse" style={{ height: 14, width: '40%', background: 'var(--border-light)', borderRadius: 4, marginBottom: 16 }} />
+                      <div className="skeleton-pulse" style={{ height: 14, width: '90%', background: 'var(--border-light)', borderRadius: 4, marginBottom: 8 }} />
+                      <div className="skeleton-pulse" style={{ height: 14, width: '60%', background: 'var(--border-light)', borderRadius: 4 }} />
+                    </div>
+                    <div className="skeleton-pulse" style={{ height: 38, width: '100%', background: 'var(--border-light)', borderRadius: 6, marginTop: 20 }} />
+                  </div>
+                ))}
+              </div>
+            ) : exams.length === 0 ? (
               <p style={{ color: 'var(--text-secondary)' }}>No exams are currently available.</p>
             ) : (
               <div className="exam-list-grid" style={{ marginBottom: 40 }}>
@@ -152,7 +164,32 @@ export default function StudentDashboard() {
               Recent Attempts
             </h3>
 
-            {attempts.length === 0 ? (
+            {loading ? (
+              <div className="admin-table-wrapper">
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Exam</th>
+                      <th>Date</th>
+                      <th>Violations</th>
+                      <th>Status</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[1, 2].map((i) => (
+                      <tr key={i}>
+                        <td><div className="skeleton-pulse" style={{ height: 16, width: 150, background: 'var(--border-light)', borderRadius: 4 }} /></td>
+                        <td><div className="skeleton-pulse" style={{ height: 16, width: 80, background: 'var(--border-light)', borderRadius: 4 }} /></td>
+                        <td><div className="skeleton-pulse" style={{ height: 20, width: 60, background: 'var(--border-light)', borderRadius: 4 }} /></td>
+                        <td><div className="skeleton-pulse" style={{ height: 20, width: 80, background: 'var(--border-light)', borderRadius: 4 }} /></td>
+                        <td><div className="skeleton-pulse" style={{ height: 16, width: 40, background: 'var(--border-light)', borderRadius: 4 }} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : attempts.length === 0 ? (
               <p style={{ color: 'var(--text-secondary)' }}>You haven't attempted any exams yet.</p>
             ) : (
               <div className="admin-table-wrapper">

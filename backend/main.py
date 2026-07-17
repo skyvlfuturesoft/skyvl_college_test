@@ -37,7 +37,14 @@ app.add_middleware(
 import uuid
 
 # ── Supabase Credentials & Fallback Detection ──
-IS_MOCK_MODE = os.getenv("IS_MOCK_MODE", "true").lower() in ("true", "1", "yes") or not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_SERVICE_KEY
+IS_MOCK_MODE = (
+    os.getenv("IS_MOCK_MODE", "false").lower() in ("true", "1", "yes")
+    or not SUPABASE_URL
+    or not SUPABASE_KEY
+    or not SUPABASE_SERVICE_KEY
+    or "placeholder" in SUPABASE_URL.lower()
+    or "placeholder" in SUPABASE_KEY.lower()
+)
 
 
 # ── Mock Database Store (For Offline / Localhost Running) ──
@@ -169,6 +176,11 @@ class MockQueryBuilder:
         self._op = 'delete'
         return self
 
+    def upsert(self, payload, **kwargs):
+        self._op = 'upsert'
+        self._insert_payload = {**payload}
+        return self
+
     # ── Execute ──
 
     def execute(self):
@@ -178,6 +190,8 @@ class MockQueryBuilder:
             return self._do_update()
         elif self._op == 'delete':
             return self._do_delete()
+        elif self._op == 'upsert':
+            return self._do_upsert()
         else:
             return self._do_select()
 
@@ -396,6 +410,49 @@ class MockQueryBuilder:
                     del db_store.documents[key]
         return MockResult([])
 
+    def _do_upsert(self):
+        payload = self._insert_payload
+        tn = self.table_name
+        
+        # Determine uniqueness conflict key
+        if tn == "live_sessions":
+            # conflict on attempt_id
+            attempt_id = payload.get("attempt_id")
+            if attempt_id in db_store.live_sessions:
+                # Update existing
+                db_store.live_sessions[attempt_id].update(payload)
+                return MockResult([db_store.live_sessions[attempt_id]])
+            else:
+                # Insert new
+                if "id" not in payload:
+                    payload["id"] = str(uuid.uuid4())
+                payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+                db_store.live_sessions[attempt_id] = payload
+                return MockResult([payload])
+                
+        elif tn == "answers":
+            # conflict on (attempt_id, question_id)
+            attempt_id = payload.get("attempt_id")
+            question_id = payload.get("question_id")
+            matched_id = None
+            for key, val in db_store.answers.items():
+                if val.get("attempt_id") == attempt_id and val.get("question_id") == question_id:
+                    matched_id = key
+                    break
+            if matched_id:
+                db_store.answers[matched_id].update(payload)
+                return MockResult([db_store.answers[matched_id]])
+            else:
+                if "id" not in payload:
+                    payload["id"] = str(uuid.uuid4())
+                payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+                db_store.answers[payload["id"]] = payload
+                return MockResult([payload])
+                
+        else:
+            # default insert fallback
+            return self._do_insert()
+
 
 class MockSupabaseClient:
     def table(self, name):
@@ -460,10 +517,24 @@ async def get_current_user(authorization: str = Header(...)):
                 user_id = payload.get("sub")
                 email = payload.get("email")
                 user_metadata = payload.get("user_metadata") or {}
-                role = user_metadata.get("role")
+                app_metadata = payload.get("app_metadata") or {}
+                # Role can be in user_metadata (custom) OR app_metadata (Supabase standard)
+                role = user_metadata.get("role") or app_metadata.get("role")
                 name = user_metadata.get("name", email.split("@")[0] if email else "User")
                 
-                if user_id and email and role:
+                if user_id and email:
+                    # If role not in JWT claims, fetch from profiles table directly
+                    if not role:
+                        try:
+                            sb_service = get_supabase()
+                            profile_res = sb_service.table("profiles").select("role, name").eq("id", user_id).single().execute()
+                            if profile_res.data:
+                                role = profile_res.data.get("role", "student")
+                                name = profile_res.data.get("name") or name
+                            else:
+                                role = "student"
+                        except Exception:
+                            role = "student"
                     return {
                         "id": user_id,
                         "email": email,
@@ -474,37 +545,43 @@ async def get_current_user(authorization: str = Header(...)):
             except Exception:
                 pass
 
-        # Fallback to Supabase API verification (network calls) if local verification fails or secret is missing
-        sb = get_public_supabase()
-        user_response = sb.auth.get_user(token)
-        if not user_response or not user_response.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        user = user_response.user
-        # Get profile with role using service role client to bypass RLS in backend auth checks
-        sb_service = get_supabase()
-        profile_res = sb_service.table("profiles").select("*").eq("id", str(user.id)).execute()
-        if not profile_res.data:
-            metadata = getattr(user, 'user_metadata', None) or {}
-            name = metadata.get("name", user.email.split("@")[0])
-            role = metadata.get("role", "student")
-            profile_insert = sb_service.table("profiles").insert({
-                "id": str(user.id),
-                "name": name,
-                "email": user.email,
-                "role": role
-            }).execute()
-            profile_data = profile_insert.data[0] if (profile_insert and profile_insert.data) else {"role": role, "name": name}
-        else:
-            profile_data = profile_res.data[0]
+        # Fallback to Supabase API verification (network calls) if local verification fails
+        try:
+            sb = get_public_supabase()
+            user_response = sb.auth.get_user(token)
+            if not user_response or not user_response.user:
+                raise HTTPException(status_code=401, detail="Invalid or expired token — please log in again")
+            
+            user = user_response.user
+            sb_service = get_supabase()
+            profile_res = sb_service.table("profiles").select("*").eq("id", str(user.id)).execute()
+            if not profile_res.data:
+                metadata = getattr(user, 'user_metadata', None) or {}
+                name = metadata.get("name", user.email.split("@")[0])
+                role = metadata.get("role", "student")
+                profile_insert = sb_service.table("profiles").insert({
+                    "id": str(user.id),
+                    "name": name,
+                    "email": user.email,
+                    "role": role
+                }).execute()
+                profile_data = profile_insert.data[0] if (profile_insert and profile_insert.data) else {"role": role, "name": name}
+            else:
+                profile_data = profile_res.data[0]
 
-        return {
-            "id": str(user.id),
-            "email": user.email,
-            "role": profile_data.get("role", "student"),
-            "name": profile_data.get("name", ""),
-            "token": token,
-        }
+            return {
+                "id": str(user.id),
+                "email": user.email,
+                "role": profile_data.get("role", "student"),
+                "name": profile_data.get("name", ""),
+                "token": token,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Session expired — please log in again")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
 
@@ -542,13 +619,17 @@ class ExamUpdate(BaseModel):
 class QuestionCreate(BaseModel):
     exam_id: str
     question_text: str
-    options: list[str]  # ["A", "B", "C", "D"]
-    correct_answer: int  # index 0-3
+    question_type: Optional[str] = "mcq"
+    image_url: Optional[str] = None
+    options: Optional[list[str]] = []
+    correct_answer: Optional[int] = 0
+    accepted_answers: Optional[list[str]] = []
     marks: int = 1
 
 class AnswerSubmit(BaseModel):
     question_id: str
-    selected_option: int  # index 0-3
+    selected_option: Optional[int] = None
+    selected_answer_text: Optional[str] = None
 
 class EventLog(BaseModel):
     attempt_id: Optional[str] = None
@@ -743,9 +824,9 @@ async def reset_password(data: ResetPasswordInput):
 async def list_exams(user=Depends(get_current_user)):
     sb = get_supabase()
     if user["role"] == "admin":
-        result = sb.table("exams").select("*, profiles(name)").order("created_at", desc=True).execute()
+        result = sb.table("exams").select("id, title, description, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations, profiles(name)").order("created_at", desc=True).execute()
     else:
-        result = sb.table("exams").select("*").eq("is_published", True).order("created_at", desc=True).execute()
+        result = sb.table("exams").select("id, title, description, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations").eq("is_published", True).order("created_at", desc=True).execute()
     return {"exams": result.data or []}
 
 @app.post("/api/exams")
@@ -779,7 +860,7 @@ async def update_exam(exam_id: str, data: ExamUpdate, user=Depends(require_admin
 @app.get("/api/exams/{exam_id}")
 async def get_exam(exam_id: str, user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("exams").select("*").eq("id", exam_id).single().execute()
+    result = sb.table("exams").select("id, title, description, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations").eq("id", exam_id).single().execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Exam not found")
     return {"exam": result.data}
@@ -792,12 +873,21 @@ async def get_exam(exam_id: str, user=Depends(get_current_user)):
 @app.get("/api/exams/{exam_id}/questions")
 async def get_questions(exam_id: str, user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("questions").select("*").eq("exam_id", exam_id).order("created_at").execute()
-    questions = result.data or []
-    
+    try:
+        result = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, accepted_answers, question_type, image_url, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
+        questions = result.data or []
+    except Exception:
+        # Fallback if migration_v6 columns do not exist in questions table
+        result = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
+        questions = result.data or []
+        for q in questions:
+            q["accepted_answers"] = []
+            q["question_type"] = "mcq"
+            q["image_url"] = None
+
     # Randomize questions order seeded per student attempt
     if user["role"] != "admin":
-        attempt = sb.table("attempts").select("*").eq("student_id", user["id"]).eq("exam_id", exam_id).eq("status", "in_progress").execute()
+        attempt = sb.table("attempts").select("id").eq("student_id", user["id"]).eq("exam_id", exam_id).eq("status", "in_progress").execute()
         if attempt.data:
             import random
             attempt_id = attempt.data[0]["id"]
@@ -808,30 +898,57 @@ async def get_questions(exam_id: str, user=Depends(get_current_user)):
             
             # Strip correct answers during exam
             questions = [
-                {**q, "correct_answer": None} for q in questions
+                {**q, "correct_answer": None, "accepted_answers": None} for q in questions
             ]
         else:
             # Not in active exam, still strip answers
-            questions = [{**q, "correct_answer": None} for q in questions]
+            questions = [{**q, "correct_answer": None, "accepted_answers": None} for q in questions]
             
     return {"questions": questions}
 
 @app.post("/api/questions")
 async def create_question(data: QuestionCreate, user=Depends(require_admin)):
     sb = get_supabase()
-    result = sb.table("questions").insert({
+    payload = {
         "exam_id": data.exam_id,
         "question_text": data.question_text,
         "options": data.options,
         "correct_answer": data.correct_answer,
         "marks": data.marks,
-    }).execute()
+    }
+    try:
+        result = sb.table("questions").insert({
+            **payload,
+            "question_type": data.question_type,
+            "image_url": data.image_url,
+            "accepted_answers": data.accepted_answers,
+        }).execute()
+    except Exception:
+        # Fallback if migration_v6 columns do not exist
+        result = sb.table("questions").insert(payload).execute()
+        if result.data:
+            result.data[0]["question_type"] = "mcq"
+            result.data[0]["image_url"] = None
+            result.data[0]["accepted_answers"] = []
+            
     return {"question": result.data[0] if result.data else None}
 
 @app.delete("/api/questions/{question_id}")
 async def delete_question(question_id: str, user=Depends(require_admin)):
     sb = get_supabase()
     sb.table("questions").delete().eq("id", question_id).execute()
+    return {"success": True}
+
+@app.delete("/api/exams/{exam_id}")
+async def delete_exam(exam_id: str, user=Depends(require_admin)):
+    sb = get_supabase()
+    
+    # Check if attempts exist for this exam
+    attempts_res = sb.table("attempts").select("id").eq("exam_id", exam_id).execute()
+    if attempts_res.data:
+        raise HTTPException(status_code=400, detail="Cannot delete exam. Students have already attempted it.")
+        
+    sb.table("exams").delete().eq("id", exam_id).execute()
     return {"success": True}
 
 
@@ -921,7 +1038,7 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
     
     # Verify attempt belongs to user and is in progress
     # Use two separate filters for mock compatibility (dict key uniqueness)
-    attempt_res = sb.table("attempts").select("*").eq("id", attempt_id).single().execute()
+    attempt_res = sb.table("attempts").select("id, student_id, status, started_at, exam_id").eq("id", attempt_id).single().execute()
     if not attempt_res.data:
         raise HTTPException(status_code=400, detail="Attempt not found")
     attempt = attempt_res.data
@@ -947,22 +1064,20 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
     except Exception:
         pass  # skip timer check on parse error
     
-    # Upsert answer: find by attempt_id + question_id
-    all_answers = sb.table("answers").select("id").eq("attempt_id", attempt_id).execute()
-    existing_id = None
-    for ans in (all_answers.data or []):
-        if ans.get("question_id") == data.question_id:
-            existing_id = ans["id"]
-            break
-
-    if existing_id:
-        sb.table("answers").update({"selected_option": data.selected_option}).eq("id", existing_id).execute()
-    else:
-        sb.table("answers").insert({
-            "attempt_id": attempt_id,
-            "question_id": data.question_id,
-            "selected_option": data.selected_option,
+    # Upsert answer directly using the unique constraint (attempt_id, question_id)
+    answer_payload = {
+        "attempt_id": attempt_id,
+        "question_id": data.question_id,
+        "selected_option": data.selected_option,
+    }
+    try:
+        sb.table("answers").upsert({
+            **answer_payload,
+            "selected_answer_text": data.selected_answer_text,
         }).execute()
+    except Exception:
+        # Fallback if selected_answer_text doesn't exist
+        sb.table("answers").upsert(answer_payload).execute()
     
     return {"success": True}
 
@@ -988,37 +1103,112 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
     exam = exam_res.data if exam_res.data else {}
     neg_marking = exam.get("negative_marking") or 0.0
 
-    answers = sb.table("answers").select("question_id, selected_option").eq("attempt_id", attempt_id).execute()
-    answer_map = {a["question_id"]: a["selected_option"] for a in (answers.data or [])}
+    try:
+        answers = sb.table("answers").select("question_id, selected_option, selected_answer_text").eq("attempt_id", attempt_id).execute()
+        answer_map = {a["question_id"]: (a.get("selected_option"), a.get("selected_answer_text")) for a in (answers.data or [])}
+    except Exception:
+        # Fallback if selected_answer_text doesn't exist
+        answers = sb.table("answers").select("question_id, selected_option").eq("attempt_id", attempt_id).execute()
+        answer_map = {a["question_id"]: (a.get("selected_option"), None) for a in (answers.data or [])}
     
-    questions = sb.table("questions").select("id, correct_answer, marks").eq("exam_id", attempt.data["exam_id"]).execute()
+    try:
+        questions = sb.table("questions").select("id, correct_answer, accepted_answers, question_type, marks").eq("exam_id", attempt.data["exam_id"]).execute()
+    except Exception:
+        # Fallback if migration_v6 columns do not exist
+        questions = sb.table("questions").select("id, correct_answer, marks").eq("exam_id", attempt.data["exam_id"]).execute()
+        if questions.data:
+            for q in questions.data:
+                q["accepted_answers"] = []
+                q["question_type"] = "mcq"
     
     score = 0.0
+    correct_count = 0
+    wrong_count = 0
+    skipped_count = 0
+    total_marks = 0
+    
     for q in (questions.data or []):
-        selected = answer_map.get(q["id"])
-        if selected is not None:
-            is_correct = selected == q["correct_answer"]
-            if is_correct:
-                score += q["marks"]
-            else:
-                score -= neg_marking
+        total_marks += q.get("marks") or 1
+        q_type = q.get("question_type") or "mcq"
+        ans_data = answer_map.get(q["id"])
+        
+        selected_opt = None
+        selected_txt = None
+        if ans_data:
+            selected_opt, selected_txt = ans_data
+            
+        is_correct = False
+        is_skipped = True
+        
+        if q_type in ("mcq", "image_mcq"):
+            if selected_opt is not None:
+                is_skipped = False
+                is_correct = selected_opt == q.get("correct_answer")
+        elif q_type in ("fill_in_blank", "image_fib"):
+            if selected_txt is not None and str(selected_txt).strip() != "":
+                is_skipped = False
+                # Match case-insensitively and trim whitespace
+                student_ans = str(selected_txt).strip().lower()
+                accepted_list = q.get("accepted_answers") or []
+                
+                if isinstance(accepted_list, str):
+                    try:
+                        import json
+                        accepted_list = json.loads(accepted_list)
+                    except Exception:
+                        accepted_list = [accepted_list]
+                if not isinstance(accepted_list, list):
+                    accepted_list = [accepted_list]
+                    
+                is_correct = any(str(ans).strip().lower() == student_ans for ans in accepted_list if ans is not None)
+                
+        if is_skipped:
+            skipped_count += 1
+        elif is_correct:
+            correct_count += 1
+            score += q.get("marks") or 1
         else:
-            is_correct = False
+            wrong_count += 1
+            score -= neg_marking
             
         # Update answer correctness
         if q["id"] in answer_map:
             sb.table("answers").update({"is_correct": is_correct}).eq("attempt_id", attempt_id).eq("question_id", q["id"]).execute()
             
-    score = max(0.0, score)
+    score = int(round(max(0.0, score)))
+    percentage = round((score / total_marks) * 100, 2) if total_marks > 0 else 0.0
+    
+    # Calculate time taken
+    started_at_str = attempt.data.get("started_at")
+    time_taken = 0
+    if started_at_str:
+        try:
+            started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+            time_taken = int((datetime.now(timezone.utc) - started_at).total_seconds())
+        except Exception:
+            pass
+    time_taken = max(0, time_taken)
     
     # Update attempt
     status = "auto_submitted" if auto else "submitted"
-    result = sb.table("attempts").update({
+    update_data = {
         "score": score,
         "status": status,
         "is_auto_submitted": auto,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", attempt_id).execute()
+    }
+    try:
+        result = sb.table("attempts").update({
+            **update_data,
+            "percentage": percentage,
+            "correct_count": correct_count,
+            "wrong_count": wrong_count,
+            "skipped_count": skipped_count,
+            "time_taken": time_taken,
+        }).eq("id", attempt_id).execute()
+    except Exception:
+        # Fallback if migration_v6 columns do not exist in attempts table
+        result = sb.table("attempts").update(update_data).eq("id", attempt_id).execute()
     
     # Log event
     sb.table("event_logs").insert({
@@ -1028,13 +1218,32 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
         "details": {"score": score, "total": attempt.data.get("total_marks", 0)},
     }).execute()
     
-    return {"attempt": result.data[0] if result.data else attempt.data, "score": score}
+    attempt_res_data = result.data[0] if result.data else attempt.data
+    if "percentage" not in attempt_res_data:
+        attempt_res_data["percentage"] = percentage
+        attempt_res_data["correct_count"] = correct_count
+        attempt_res_data["wrong_count"] = wrong_count
+        attempt_res_data["skipped_count"] = skipped_count
+        attempt_res_data["time_taken"] = time_taken
+        
+    return {"attempt": attempt_res_data, "score": score}
 
 
 @app.get("/api/attempts/{attempt_id}")
 async def get_attempt(attempt_id: str, user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("attempts").select("*, exams(title, duration)").eq("id", attempt_id).single().execute()
+    try:
+        result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration)").eq("id", attempt_id).single().execute()
+    except Exception:
+        # Fallback if migration_v6 columns do not exist
+        result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration)").eq("id", attempt_id).single().execute()
+        if result.data:
+            result.data["percentage"] = 0.0
+            result.data["correct_count"] = 0
+            result.data["wrong_count"] = 0
+            result.data["skipped_count"] = 0
+            result.data["time_taken"] = 0
+            
     if not result.data:
         raise HTTPException(status_code=404, detail="Attempt not found")
     if user["role"] != "admin" and result.data.get("student_id") != user["id"]:
@@ -1045,14 +1254,76 @@ async def get_attempt(attempt_id: str, user=Depends(get_current_user)):
 @app.get("/api/attempts/{attempt_id}/result")
 async def get_result(attempt_id: str, user=Depends(get_current_user)):
     sb = get_supabase()
-    attempt = sb.table("attempts").select("*, exams(title, duration)").eq("id", attempt_id).single().execute()
+    try:
+        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration)").eq("id", attempt_id).single().execute()
+    except Exception:
+        # Fallback if migration_v6 columns do not exist
+        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration)").eq("id", attempt_id).single().execute()
+        if attempt.data:
+            attempt.data["percentage"] = None
+            attempt.data["correct_count"] = None
+            attempt.data["wrong_count"] = None
+            attempt.data["skipped_count"] = None
+            attempt.data["time_taken"] = None
+            
     if not attempt.data:
         raise HTTPException(status_code=404, detail="Attempt not found")
     if user["role"] != "admin" and attempt.data.get("student_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Unauthorized attempt access")
     
-    answers = sb.table("answers").select("*, questions(question_text, options, correct_answer, marks)").eq("attempt_id", attempt_id).execute()
-    
+    try:
+        answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at, questions(question_text, options, correct_answer, accepted_answers, question_type, image_url, marks)").eq("attempt_id", attempt_id).execute()
+    except Exception:
+        # Fallback query if migration_v6 columns do not exist in questions or answers table
+        try:
+            answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at, questions(question_text, options, correct_answer, marks)").eq("attempt_id", attempt_id).execute()
+        except Exception:
+            answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, is_correct, created_at, questions(question_text, options, correct_answer, marks)").eq("attempt_id", attempt_id).execute()
+            if answers.data:
+                for ans in answers.data:
+                    ans["selected_answer_text"] = None
+        if answers.data:
+            for ans in answers.data:
+                if "questions" in ans and ans["questions"]:
+                    ans["questions"]["accepted_answers"] = []
+                    ans["questions"]["question_type"] = "mcq"
+                    ans["questions"]["image_url"] = None
+                    
+    # Calculate fallback values dynamically if columns were missing in database
+    if attempt.data and (attempt.data.get("percentage") is None or attempt.data.get("correct_count") is None):
+        score = attempt.data.get("score") or 0
+        total_marks = attempt.data.get("total_marks") or 1
+        attempt.data["percentage"] = round((score / total_marks) * 100, 2)
+        
+        ans_list = answers.data or []
+        corr = 0
+        skip = 0
+        for ans in ans_list:
+            if ans.get("is_correct") is True:
+                corr += 1
+            # Check if skipped (both MCQ and FIB options are empty/None)
+            is_mcq_skipped = ans.get("selected_option") is None
+            is_fib_skipped = ans.get("selected_answer_text") is None or str(ans.get("selected_answer_text")).strip() == ""
+            if is_mcq_skipped and is_fib_skipped:
+                skip += 1
+                
+        attempt.data["correct_count"] = corr
+        attempt.data["skipped_count"] = skip
+        attempt.data["wrong_count"] = max(0, len(ans_list) - corr - skip)
+        
+        # Calculate time taken if possible
+        started_at_str = attempt.data.get("started_at")
+        created_at_str = attempt.data.get("created_at")
+        if started_at_str and created_at_str:
+            try:
+                started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+                created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                attempt.data["time_taken"] = max(0, int((created_at - started_at).total_seconds()))
+            except Exception:
+                attempt.data["time_taken"] = 0
+        else:
+            attempt.data["time_taken"] = 0
+            
     return {
         "attempt": attempt.data,
         "answers": answers.data or [],
@@ -1062,7 +1333,18 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
 @app.get("/api/my-attempts")
 async def my_attempts(user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("attempts").select("*, exams(title, duration)").eq("student_id", user["id"]).order("created_at", desc=True).execute()
+    try:
+        result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration)").eq("student_id", user["id"]).order("created_at", desc=True).execute()
+    except Exception:
+        # Fallback if migration_v6 columns do not exist
+        result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration)").eq("student_id", user["id"]).order("created_at", desc=True).execute()
+        if result.data:
+            for r in result.data:
+                r["percentage"] = 0.0
+                r["correct_count"] = 0
+                r["wrong_count"] = 0
+                r["skipped_count"] = 0
+                r["time_taken"] = 0
     return {"attempts": result.data or []}
 
 
@@ -1162,7 +1444,7 @@ async def monitor_stats(user=Depends(require_admin)):
 @app.get("/api/results")
 async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
     sb = get_supabase()
-    query = sb.table("attempts").select("*, profiles(name, email), exams(title)").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
+    query = sb.table("attempts").select("*, profiles(name, email, department, section), exams(title)").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
     if exam_id:
         query = query.eq("exam_id", exam_id)
     result = query.execute()
@@ -1197,12 +1479,19 @@ async def create_violation(data: ViolationCreate, user=Depends(get_current_user)
         raise HTTPException(status_code=403, detail="Unauthorized attempt access")
         
     current_status = attempt.get("status")
-    if current_status in ('submitted', 'auto_submitted', 'terminated'):
+    if current_status in ('submitted', 'auto_submitted'):
+        return {
+            "success": True,
+            "violation_count": attempt.get("violation_count", 0),
+            "kicked": False,
+            "reason": "Exam already successfully submitted."
+        }
+    elif current_status == 'terminated':
         return {
             "success": False,
             "violation_count": attempt.get("violation_count", 0),
             "kicked": True,
-            "reason": f"Exam session is already locked/terminated (Status: {current_status})"
+            "reason": "Exam session is terminated."
         }
         
     # Get configuration settings from exam
@@ -1338,68 +1627,97 @@ async def get_live_students(user=Depends(require_admin)):
     sb = get_supabase()
     
     # 1. Fetch active live sessions
-    sessions_res = sb.table("live_sessions").select("*").execute()
+    sessions_res = sb.table("live_sessions").select("id, attempt_id, student_id, current_question_index, answered_count, time_remaining, browser, os, ip_address, connection_status, is_paused").execute()
     sessions = sessions_res.data or []
     session_map = {s["attempt_id"]: s for s in sessions}
     
-    # 2. Fetch attempts that are either 'in_progress' or 'terminated'
-    attempts_res = sb.table("attempts").select("*").in_("status", ["in_progress", "terminated"]).execute()
+    # 2. Fetch attempts that are either 'in_progress' or 'terminated' using join to get profile and exam info in one query
+    attempts_res = sb.table("attempts").select(
+        "id, student_id, exam_id, status, violation_count, started_at, profiles(name, email), exams(title)"
+    ).in_("status", ["in_progress", "terminated"]).execute()
     attempts_data = attempts_res.data or []
     
+    # Get all unique exam_ids to fetch question counts in bulk
+    exam_ids = {att["exam_id"] for att in attempts_data if att.get("exam_id")}
+    
+    # Get question counts in bulk
+    q_counts = {}
+    if exam_ids:
+        if IS_MOCK_MODE:
+            for eid in exam_ids:
+                q_counts[eid] = len(db_store.questions.get(eid, []))
+        else:
+            try:
+                q_res = sb.table("questions").select("exam_id, id").in_("exam_id", list(exam_ids)).execute()
+                if q_res.data:
+                    from collections import Counter
+                    q_counts = Counter(q["exam_id"] for q in q_res.data)
+            except Exception as e:
+                print(f"Error fetching question counts in bulk: {e}")
+                
+    # Get kick reasons in bulk (only for terminated attempts)
+    terminated_attempt_ids = [att["id"] for att in attempts_data if att.get("status") == "terminated"]
+    kick_reasons = {}
+    if terminated_attempt_ids:
+        if IS_MOCK_MODE:
+            for k in db_store.kick_logs:
+                if k.get("attempt_id") in terminated_attempt_ids:
+                    kick_reasons[k["attempt_id"]] = k.get("reason", "Terminated due to rule violations.")
+        else:
+            try:
+                kick_res = sb.table("kick_logs").select("attempt_id, reason").in_("attempt_id", terminated_attempt_ids).execute()
+                if kick_res.data:
+                    kick_reasons = {k["attempt_id"]: k["reason"] for k in kick_res.data}
+            except Exception as e:
+                print(f"Error fetching kick reasons in bulk: {e}")
+                
     results = []
     for att in attempts_data:
         student_id = att.get("student_id")
         attempt_id = att.get("id")
+        exam_id = att.get("exam_id")
         
         # Get live session metadata if exists
         s = session_map.get(attempt_id, {})
         
-        profile = sb.table("profiles").select("*").eq("id", student_id).single().execute()
-        profile_data = profile.data or {}
+        # Profile details from joined response
+        profile_data = att.get("profiles") or {}
+        # Exam details from joined response
+        exam_data = att.get("exams") or {}
         
-        exam_id = att.get("exam_id")
-        exam = sb.table("exams").select("*").eq("id", exam_id).single().execute() if exam_id else None
-        exam_data = exam.data if exam else {}
+        # Get question count
+        q_count = q_counts.get(exam_id, 0)
+        if q_count == 0:
+            q_count = 1  # avoid division by zero
+            
+        kick_reason = kick_reasons.get(attempt_id, "Terminated due to rule violations.") if att.get("status") == "terminated" else ""
         
-        # Calculate questions count
-        q_count = len(db_store.questions.get(exam_id, [])) if IS_MOCK_MODE else 3
-        if not IS_MOCK_MODE and exam_id:
-            try:
-                q_res = sb.table("questions").select("id").eq("exam_id", exam_id).execute()
-                if q_res.data:
-                    q_count = len(q_res.data)
-            except Exception:
-                pass
-                
-        # Look up kick reason if terminated
-        kick_reason = ""
-        if att.get("status") == "terminated":
-            kick_res = sb.table("kick_logs").select("reason").eq("attempt_id", attempt_id).execute()
-            if kick_res.data:
-                kick_reason = kick_res.data[0].get("reason", "Terminated due to rule violations.")
+        student_name = profile_data.get("name") or "Student"
+        student_email = profile_data.get("email") or ""
         
         results.append({
             "id": s.get("id") or f"temp-{attempt_id}",
             "attempt_id": attempt_id,
             "student_id": student_id,
-            "student_name": profile_data.get("name", "Student"),
-            "register_no": profile_data.get("email", "").split("@")[0].upper(),
-            "department": "CSE" if "cse" in profile_data.get("email", "") else "IT" if "it" in profile_data.get("email", "") else "ECE",
+            "student_name": student_name,
+            "student_email": student_email,
             "exam_name": exam_data.get("title", "Exam"),
             "current_question": s.get("current_question_index", 0) + 1 if s else 1,
             "answered_questions": s.get("answered_count", 0) if s else 0,
+            "total_questions": q_count,
             "remaining_time": s.get("time_remaining", 0) if s else 0,
-            "progress_percent": int((s.get("answered_count", 0) / max(1, q_count)) * 100) if s and exam_id else 0,
+            "progress_percent": int((s.get("answered_count", 0) / q_count) * 100) if s and q_count > 0 else 0,
             "violation_count": att.get("violation_count", 0),
             "status": att.get("status", "in_progress"),
-            "browser": s.get("browser", "Chrome") if s else "—",
-            "os": s.get("os", "Windows") if s else "—",
-            "ip_address": s.get("ip_address", "127.0.0.1") if s else "—",
+            "browser": s.get("browser", "") if s else "",
+            "os": s.get("os", "") if s else "",
+            "ip_address": s.get("ip_address", "") if s else "",
             "login_time": att.get("started_at"),
             "connection_status": s.get("connection_status", "connected") if s else "disconnected",
             "is_paused": s.get("is_paused", False) if s else False,
             "kick_reason": kick_reason
         })
+        
     return {"live_students": results}
 
 @app.get("/api/activity-feed")
@@ -1538,11 +1856,23 @@ async def reinstate_attempt(attempt_id: str, user=Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Attempt not found")
     attempt = attempt_res.data
     
-    # 2. Reset attempt status and violations
+    # Get config settings from exam
+    exam_res = sb.table("exams").select("*").eq("id", attempt["exam_id"]).single().execute()
+    exam = exam_res.data if exam_res.data else {}
+    max_violations = exam.get("max_violations") or 3
+    duration = exam.get("duration") or 30
+    
+    # Preserve existing violations but cap it at max_violations - 1
+    # so they remain on their final warning strike instead of getting auto-kicked again.
+    current_violations = attempt.get("violation_count") or 0
+    new_violations = min(current_violations, max_violations - 1)
+    
+    # 2. Reset attempt status, update started_at to current time, and clear submitted_at
     sb.table("attempts").update({
         "status": "in_progress",
-        "violation_count": 0,
-        "submitted_at": None
+        "violation_count": new_violations,
+        "submitted_at": None,
+        "started_at": datetime.now(timezone.utc).isoformat()
     }).eq("id", attempt_id).execute()
     
     # 3. Delete kick logs
@@ -1556,14 +1886,13 @@ async def reinstate_attempt(attempt_id: str, user=Depends(require_admin)):
         "details": {"message": "Admin reinstatement override applied."}
     }).execute()
     
-    # 5. Re-create live session
-    # Live session heartbeat will sync remaining time
+    # 5. Re-create live session with full exam duration
     sb.table("live_sessions").insert({
         "attempt_id": attempt_id,
         "student_id": attempt["student_id"],
         "current_question_index": 0,
         "answered_count": 0,
-        "time_remaining": 600,
+        "time_remaining": duration * 60,
         "browser": "Chrome",
         "os": "Windows",
         "connection_status": "connected"
@@ -1587,15 +1916,15 @@ async def get_analytics(user=Depends(require_admin)):
     
     # Fetch in parallel to optimize latency (100-150ms total instead of 400-600ms sequential)
     from concurrent.futures import ThreadPoolExecutor
-    def fetch_data(table_name):
-        return sb.table(table_name).select("*").execute().data or []
+    def fetch_data(table_name, select_cols="*"):
+        return sb.table(table_name).select(select_cols).execute().data or []
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
-            "attempts": executor.submit(fetch_data, "attempts"),
-            "violations": executor.submit(fetch_data, "violations"),
-            "kicks": executor.submit(fetch_data, "kick_logs"),
-            "profiles": executor.submit(fetch_data, "profiles"),
+            "attempts": executor.submit(fetch_data, "attempts", "status, score, total_marks, student_id, created_at"),
+            "violations": executor.submit(fetch_data, "violations", "created_at"),
+            "kicks": executor.submit(fetch_data, "kick_logs", "created_at"),
+            "profiles": executor.submit(fetch_data, "profiles", "id, email"),
         }
         attempts = futures["attempts"].result()
         violations = futures["violations"].result()
@@ -1676,7 +2005,7 @@ async def get_analytics(user=Depends(require_admin)):
         })
         
     # 4. Question Difficulty
-    answers = sb.table("answers").select("*").execute().data or []
+    answers = sb.table("answers").select("question_id, is_correct").execute().data or []
     q_correct = defaultdict(int)
     q_total = defaultdict(int)
     
@@ -1688,7 +2017,7 @@ async def get_analytics(user=Depends(require_admin)):
             
     all_qs = []
     try:
-        all_qs_res = sb.table("questions").select("*").execute()
+        all_qs_res = sb.table("questions").select("id, question_text").execute()
         all_qs = all_qs_res.data or []
     except Exception:
         pass
@@ -1775,74 +2104,223 @@ async def parse_exam_questions(file: UploadFile = File(...), user=Depends(requir
         try:
             import pdfplumber
             import re
+            import io
+            import uuid
             
-            text = ""
-            with pdfplumber.open(file.file) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-            
-            lines = text.split("\n")
+            questions = []
             current_q = None
+            in_answer_key = False
             
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Skip section header and tip lines
-                if re.match(r'^\s*(?:Section|Part|Tip)\b', line, re.IGNORECASE):
-                    continue
-                
-                # Match patterns like Q1. or 1.
-                q_match = re.match(r'^(?:Q\d+|Question\s*\d+|\d+)\s*[\.\):]\s+(.*)$', line, re.IGNORECASE)
-                if q_match:
-                    if current_q and current_q["question_text"]:
-                        questions.append(current_q)
-                    current_q = {
-                        "question_text": q_match.group(1).strip(),
-                        "options": ["", "", "", ""],
-                        "correct_answer": 0,
-                        "marks": 1
-                    }
-                    continue
-                
-                if current_q:
-                    inline_opts = re.findall(r'\b([A-Da-d])\s*[\.\):\-\/]+\s*(.*?)(?=\b[A-Da-d]\s*[\.\):\-\/]+|$)', line, re.IGNORECASE)
-                    if len(inline_opts) > 1:
-                        for opt_letter, opt_val in inline_opts:
-                            opt_idx = ord(opt_letter.upper()) - ord('A')
-                            if 0 <= opt_idx < 4:
-                                current_q["options"][opt_idx] = opt_val.strip()
-                        continue
-                    
-                    opt_match = re.match(r'^\s*([A-Da-d])\s*[\.\):\-\/]+\s*(.*)$', line)
-                    if opt_match:
-                        opt_letter = opt_match.group(1).upper()
-                        opt_idx = ord(opt_letter) - ord('A')
-                        current_q["options"][opt_idx] = opt_match.group(2).strip()
-                        continue
-                    
-                    ans_match = re.search(r'(?:correct\s+answer|correct\s+option|answer|correct|key)\s*(?:is)?\s*[:=\s\-]*\s*\b([A-D])\b', line, re.IGNORECASE)
-                    if ans_match:
-                        ans_letter = ans_match.group(1).upper()
-                        current_q["correct_answer"] = ord(ans_letter) - ord('A')
-                        continue
-                    
-                    if not any(current_q["options"]):
-                        current_q["question_text"] += " " + line
-                    else:
-                        filled_indices = [i for i, opt in enumerate(current_q["options"]) if opt]
-                        if filled_indices:
-                            last_idx = filled_indices[-1]
-                            current_q["options"][last_idx] += " " + line
+            # Answer key lookup mapping
+            answer_key = {}
             
+            # Read full PDF once to build key mapping in the background
+            full_text = ""
+            
+            with pdfplumber.open(file.file) as pdf:
+                # 1. Build answer key map from full text first
+                for page in pdf.pages:
+                    p_text = page.extract_text()
+                    if p_text:
+                        full_text += p_text + "\n"
+                
+                key_section_match = re.search(r'\b(?:Answer\s*Key|Correct\s*Answer|Keys?)\b(.*)$', full_text, re.IGNORECASE | re.DOTALL)
+                if key_section_match:
+                    key_text = key_section_match.group(1)
+                    for k_match in re.finditer(r'^\s*(\d+)\s+([A-D])\b', key_text, re.MULTILINE | re.IGNORECASE):
+                        q_num = int(k_match.group(1))
+                        ans_letter = k_match.group(2).upper()
+                        answer_key[q_num] = ord(ans_letter) - ord('A')
+                    
+                    if not answer_key:
+                        for k_match in re.finditer(r'\b(\d+)\s+([A-D])\b', key_text, re.IGNORECASE):
+                            q_num = int(k_match.group(1))
+                            ans_letter = k_match.group(2).upper()
+                            answer_key[q_num] = ord(ans_letter) - ord('A')
+                
+                # 2. Iterate page-by-page to parse questions and extract diagrams
+                for p_idx, page in enumerate(pdf.pages):
+                    page_text = page.extract_text()
+                    if not page_text:
+                        continue
+                        
+                    lines = page_text.split("\n")
+                    
+                    # Try to extract the first image on this page
+                    page_image_url = None
+                    if page.images:
+                        try:
+                            img = page.images[0]
+                            # Try crop conversion first (best quality, keeps charts/vector graphs)
+                            try:
+                                bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
+                                cropped = page.crop(bbox)
+                                pil_img = cropped.to_image(resolution=150).original
+                                img_byte_arr = io.BytesIO()
+                                pil_img.save(img_byte_arr, format='JPEG')
+                                img_bytes = img_byte_arr.getvalue()
+                                
+                                sb = get_supabase()
+                                file_name = f"pdf-extracted/{uuid.uuid4()}.jpg"
+                                sb.storage.from_("exam-images").upload(
+                                    path=file_name,
+                                    file=img_bytes,
+                                    file_options={"content-type": "image/jpeg"}
+                                )
+                                page_image_url = sb.storage.from_("exam-images").get_public_url(file_name)
+                            except Exception as crop_err:
+                                print(f"Crop image extraction failed: {crop_err}. Trying stream decoding...")
+                                # Pure python stream decoder (no poppler dependency)
+                                if 'stream' in img:
+                                    stream = img['stream']
+                                    data = stream.get_data()
+                                    
+                                    # 1. DCTDecode (native JPEG)
+                                    if b'JFIF' in data or b'Exif' in data or data.startswith(b'\xff\xd8'):
+                                        sb = get_supabase()
+                                        file_name = f"pdf-extracted/{uuid.uuid4()}.jpg"
+                                        sb.storage.from_("exam-images").upload(
+                                            path=file_name,
+                                            file=data,
+                                            file_options={"content-type": "image/jpeg"}
+                                        )
+                                        page_image_url = sb.storage.from_("exam-images").get_public_url(file_name)
+                                    # 2. FlateDecode (PNG/uncompressed stream)
+                                    else:
+                                        from PIL import Image as PILImage
+                                        width = img.get("width")
+                                        height = img.get("height")
+                                        colorspace = img.get("colorspace")
+                                        
+                                        # Decode colorspace mapping
+                                        mode = None
+                                        if colorspace == 'DeviceRGB' or (isinstance(colorspace, list) and 'DeviceRGB' in colorspace):
+                                            mode = 'RGB'
+                                        elif colorspace == 'DeviceGray' or colorspace == 'DefaultGray' or (isinstance(colorspace, list) and 'DeviceGray' in colorspace):
+                                            mode = 'L'
+                                        elif colorspace == 'DeviceCMYK' or (isinstance(colorspace, list) and 'DeviceCMYK' in colorspace):
+                                            mode = 'CMYK'
+                                            
+                                        if mode and width and height:
+                                            # Create PIL image from raw bytes
+                                            pil_img = PILImage.frombytes(mode, (width, height), data)
+                                            # Convert to RGB if needed
+                                            if mode == 'CMYK':
+                                                pil_img = pil_img.convert('RGB')
+                                            
+                                            img_byte_arr = io.BytesIO()
+                                            pil_img.save(img_byte_arr, format='JPEG')
+                                            img_bytes = img_byte_arr.getvalue()
+                                            
+                                            sb = get_supabase()
+                                            file_name = f"pdf-extracted/{uuid.uuid4()}.jpg"
+                                            sb.storage.from_("exam-images").upload(
+                                                path=file_name,
+                                                file=img_bytes,
+                                                file_options={"content-type": "image/jpeg"}
+                                            )
+                                            page_image_url = sb.storage.from_("exam-images").get_public_url(file_name)
+                        except Exception as img_err:
+                            print(f"Failed extracting page image: {img_err}")
+                    
+                    first_q_on_page = True
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                            
+                        # Check if we hit the answer key section
+                        if re.search(r'\b(?:Answer\s*Key|Correct\s*Answer|Keys?)\b', line, re.IGNORECASE):
+                            in_answer_key = True
+                            continue
+                            
+                        if in_answer_key:
+                            continue
+                            
+                        # Skip section header or helper lines
+                        if re.match(r'^\s*(?:Section|Part|Tip)\b', line, re.IGNORECASE):
+                            continue
+                            
+                        # Match patterns: "Question 1", "Q1", "1. " etc.
+                        q_match = None
+                        q_title_match = re.match(r'^\s*(?:Question\s*(\d+)|Q\s*(\d+))\s*[\.\):\-\s]*\s*(.*)$', line, re.IGNORECASE)
+                        if q_title_match:
+                            text_rem = q_title_match.group(3).strip()
+                            q_match = True
+                        else:
+                            # Match digit followed by dot, bracket, colon, or just space and a capital letter
+                            q_num_match = re.match(r'^\s*(\d+)\s*[\.\):\-\/]\s*(.*)$', line)
+                            if not q_num_match:
+                                q_num_match = re.match(r'^\s*(\d+)\s+([A-Z].*)$', line)
+                            if q_num_match:
+                                text_rem = q_num_match.group(2).strip()
+                                q_match = True
+                                
+                        if q_match:
+                            if current_q and current_q["question_text"]:
+                                questions.append(current_q)
+                                
+                            current_q = {
+                                "question_text": text_rem,
+                                "question_type": "mcq",
+                                "image_url": "",
+                                "options": ["", "", "", ""],
+                                "correct_answer": 0,
+                                "marks": 1
+                            }
+                            
+                            # Associate page image with the first question on this page
+                            if page_image_url and first_q_on_page:
+                                current_q["image_url"] = page_image_url
+                                current_q["question_type"] = "image_mcq"
+                                first_q_on_page = False
+                            continue
+                            
+                        if current_q:
+                            # Parse inline options (e.g. A. option1 B. option2, or (a) option1 (b) option2)
+                            inline_opts = re.findall(r'(?:[\(\[\b])([A-Da-d])(?:[\)\]\.\:\-\/\s])\s*(.*?)(?=(?:[\(\[\b])[A-Da-d](?:[\)\]\.\:\-\/\s])|$)', line, re.IGNORECASE)
+                            if len(inline_opts) > 1:
+                                for opt_letter, opt_val in inline_opts:
+                                    opt_idx = ord(opt_letter.upper()) - ord('A')
+                                    if 0 <= opt_idx < 4:
+                                        current_q["options"][opt_idx] = opt_val.strip()
+                                continue
+                                
+                            # Parse block options (e.g. A. option1, or (a) option1)
+                            opt_match = re.match(r'^\s*(?:[\(\[])?([A-Da-d])(?:[\)\]\.\:\-\/]\s*|\s+)\s*(.*)$', line, re.IGNORECASE)
+                            if opt_match:
+                                opt_letter = opt_match.group(1).upper()
+                                opt_idx = ord(opt_letter) - ord('A')
+                                current_q["options"][opt_idx] = opt_match.group(2).strip()
+                                continue
+                                
+                            # Match inline correct answer notation inside question block
+                            ans_match = re.search(r'(?:correct\s+answer|correct\s+option|answer|correct|key)\s*(?:is)?\s*[:=\s\-]*\s*\b([A-D])\b', line, re.IGNORECASE)
+                            if ans_match:
+                                ans_letter = ans_match.group(1).upper()
+                                current_q["correct_answer"] = ord(ans_letter) - ord('A')
+                                continue
+                                
+                            # Append text lines to question text or last option
+                            if not any(current_q["options"]):
+                                current_q["question_text"] = (current_q["question_text"] + " " + line).strip()
+                            else:
+                                filled_indices = [i for i, opt in enumerate(current_q["options"]) if opt]
+                                if filled_indices:
+                                    last_idx = filled_indices[-1]
+                                    current_q["options"][last_idx] = (current_q["options"][last_idx] + " " + line).strip()
+                                    
             if current_q and current_q["question_text"]:
                 questions.append(current_q)
                 
-            # Fallback options parser and auto-fill loops
-            for q in questions:
+            # Post-processing map correct answers from Answer Key block & fallbacks
+            for idx, q in enumerate(questions):
+                q_num = idx + 1
+                if q_num in answer_key:
+                    q["correct_answer"] = answer_key[q_num]
+                    
+                # Search inline options inside question text as fallback
                 if not any(q["options"]):
                     opt_match = re.search(r'\s*\((?:Options|Opt|Choices)\s*[:\-]*\s*([^)]+)\)', q["question_text"], re.IGNORECASE)
                     if not opt_match:
@@ -1850,14 +2328,14 @@ async def parse_exam_questions(file: UploadFile = File(...), user=Depends(requir
                     if opt_match:
                         opts_str = opt_match.group(1)
                         parsed_opts = [o.strip() for o in re.split(r'[/,;]', opts_str) if o.strip()]
-                        for idx, val in enumerate(parsed_opts[:4]):
-                            q["options"][idx] = val
+                        for o_idx, val in enumerate(parsed_opts[:4]):
+                            q["options"][o_idx] = val
                         q["question_text"] = q["question_text"].replace(opt_match.group(0), "").strip()
                 
-                # Fill any missing choices with standard placeholders so validation doesn't block submit
-                for idx in range(4):
-                    if not q["options"][idx]:
-                        q["options"][idx] = f"Option {chr(65 + idx)}"
+                # Fill missing placeholder options to pass publisher validations
+                for o_idx in range(4):
+                    if not q["options"][o_idx]:
+                        q["options"][o_idx] = f"Option {chr(65 + o_idx)}"
                         
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to parse PDF file: {str(e)}")
@@ -1870,16 +2348,25 @@ async def parse_exam_questions(file: UploadFile = File(...), user=Depends(requir
 async def session_heartbeat(data: SessionHeartbeat, user=Depends(get_current_user)):
     sb = get_supabase()
     
-    # Check attempt status first
-    attempt_res = sb.table("attempts").select("status").eq("id", data.attempt_id).single().execute()
-    if attempt_res.data:
-        attempt_status = attempt_res.data.get("status")
-        if attempt_status in ("terminated", "submitted", "auto_submitted"):
-            try:
-                sb.table("live_sessions").delete().eq("attempt_id", data.attempt_id).execute()
-            except Exception:
-                pass
-            return {"status": attempt_status, "is_paused": False}
+    # Check attempt status first — verify ownership to avoid stale attempt cross-contamination
+    attempt_res = sb.table("attempts").select("status, student_id").eq("id", data.attempt_id).single().execute()
+    if not attempt_res.data:
+        # Attempt not found — don't crash, just tell frontend it's gone
+        return {"status": "not_found", "is_paused": False}
+    
+    attempt_status = attempt_res.data.get("status")
+    attempt_owner = attempt_res.data.get("student_id")
+    
+    # Only redirect if this student actually owns this attempt
+    if attempt_owner != user["id"]:
+        raise HTTPException(status_code=403, detail="Not your attempt")
+    
+    if attempt_status in ("terminated", "submitted", "auto_submitted"):
+        try:
+            sb.table("live_sessions").delete().eq("attempt_id", data.attempt_id).execute()
+        except Exception:
+            pass
+        return {"status": attempt_status, "is_paused": False}
 
     session_data = {
         "attempt_id": data.attempt_id,
@@ -1897,16 +2384,10 @@ async def session_heartbeat(data: SessionHeartbeat, user=Depends(get_current_use
     
     # Upsert live session (mock stores by attempt_id key)
     try:
-        existing = sb.table("live_sessions").select("id").eq("attempt_id", data.attempt_id).execute()
-        if existing.data:
-            sb.table("live_sessions").update(session_data).eq("attempt_id", data.attempt_id).execute()
-        else:
-            sb.table("live_sessions").insert(session_data).execute()
-            
-        session_check = sb.table("live_sessions").select("is_paused").eq("attempt_id", data.attempt_id).single().execute()
+        upsert_res = sb.table("live_sessions").upsert(session_data).execute()
         is_paused = False
-        if session_check.data:
-            is_paused = session_check.data.get("is_paused", False)
+        if upsert_res.data:
+            is_paused = upsert_res.data[0].get("is_paused", False)
     except Exception:
         is_paused = False
 

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
-import { ArrowLeft, Clock, Award, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Search, Clock, Award, AlertTriangle, Eye, Printer, Filter } from 'lucide-react';
 import '../../app.css';
 
 export default function ViewResults() {
@@ -10,6 +10,12 @@ export default function ViewResults() {
   const [results, setResults] = useState([]);
   const [exams, setExams] = useState([]);
   const [selectedExam, setSelectedExam] = useState('');
+  
+  // Search and filters
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedDept, setSelectedDept] = useState('');
+  const [selectedSection, setSelectedSection] = useState('');
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -20,8 +26,8 @@ export default function ViewResults() {
           api('/api/results'),
           api('/api/exams'),
         ]);
-        setResults(resData.results);
-        setExams(examsData.exams);
+        setResults(resData.results || []);
+        setExams(examsData.exams || []);
       } catch (err) {
         setError(err.message || 'Failed to load results');
       } finally {
@@ -31,17 +37,86 @@ export default function ViewResults() {
     loadData();
   }, []);
 
+  const handleExamFilterChange = async (examId) => {
+    setSelectedExam(examId);
+    setLoading(true);
+    try {
+      const data = await api('/api/results', {
+        params: examId ? { exam_id: examId } : {}
+      });
+      setResults(data.results || []);
+    } catch (err) {
+      setError(err.message || 'Failed to filter results');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Extract unique departments and sections from profile results to populate dropdowns
+  const uniqueDepts = Array.from(
+    new Set(results.map((res) => res.profiles?.department).filter(Boolean))
+  ).sort();
+
+  const uniqueSections = Array.from(
+    new Set(results.map((res) => res.profiles?.section).filter(Boolean))
+  ).sort();
+
+  // Client-side filtering logic
+  const filteredResults = results.filter((res) => {
+    const profile = res.profiles || {};
+    const name = (profile.name || '').toLowerCase();
+    const email = (profile.email || '').toLowerCase();
+    const query = searchQuery.toLowerCase();
+    
+    const matchesSearch = name.includes(query) || email.includes(query);
+    const matchesDept = selectedDept ? profile.department === selectedDept : true;
+    const matchesSection = selectedSection ? profile.section === selectedSection : true;
+
+    return matchesSearch && matchesDept && matchesSection;
+  });
+
+  // Calculate overall performance stats
+  const totalCount = filteredResults.length;
+  const passedCount = filteredResults.filter((res) => {
+    const pct = res.percentage !== undefined ? res.percentage : ((res.score / res.total_marks) * 100) || 0;
+    return pct >= (res.exams?.pass_threshold || 50);
+  }).length;
+
+  const averagePct = totalCount > 0
+    ? Math.round(
+        filteredResults.reduce((acc, curr) => {
+          const pct = curr.percentage !== undefined ? curr.percentage : ((curr.score / curr.total_marks) * 100) || 0;
+          return acc + pct;
+        }, 0) / totalCount
+      )
+    : 0;
+
+  const passRate = totalCount > 0 ? Math.round((passedCount / totalCount) * 100) : 0;
+
+  // Find top performer
+  let topPerformer = null;
+  if (totalCount > 0) {
+    topPerformer = [...filteredResults].sort((a, b) => {
+      const aPct = a.percentage !== undefined ? a.percentage : ((a.score / a.total_marks) * 100) || 0;
+      const bPct = b.percentage !== undefined ? b.percentage : ((b.score / b.total_marks) * 100) || 0;
+      return bPct - aPct;
+    })[0];
+  }
+
+  // Export spreadsheet utility (CSV)
   const exportToCSV = () => {
-    const headers = ['Student Name', 'Email', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
+    const headers = ['Student Name', 'Email', 'Department', 'Section', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
     let rows = [];
     let fileName = `exam_results_${new Date().toISOString().slice(0, 10)}.csv`;
     
-    if (results.length > 0) {
-      rows = results.map(res => {
-        const percentage = Math.round((res.score / res.total_marks) * 100) || 0;
+    if (filteredResults.length > 0) {
+      rows = filteredResults.map(res => {
+        const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
         return [
           res.profiles?.name || '—',
           res.profiles?.email || '—',
+          res.profiles?.department || '—',
+          res.profiles?.section || '—',
           res.exams?.title || '—',
           res.score,
           res.total_marks,
@@ -69,19 +144,74 @@ export default function ViewResults() {
     document.body.removeChild(link);
   };
 
-  const handleExamFilterChange = async (examId) => {
-    setSelectedExam(examId);
-    setLoading(true);
-    try {
-      const data = await api('/api/results', {
-        params: examId ? { exam_id: examId } : {}
-      });
-      setResults(data.results);
-    } catch (err) {
-      setError(err.message || 'Failed to filter results');
-    } finally {
-      setLoading(false);
-    }
+  // Export spreadsheet utility (Excel compatible XML format)
+  const exportToExcel = () => {
+    let fileName = `exam_results_${new Date().toISOString().slice(0, 10)}.xls`;
+    const headers = ['Student Name', 'Email', 'Department', 'Section', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
+    
+    let html = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <!--[if gte mso 9]>
+        <xml>
+          <x:ExcelWorkbook>
+            <x:ExcelWorksheets>
+              <x:ExcelWorksheet>
+                <x:Name>Results</x:Name>
+                <x:WorksheetOptions>
+                  <x:DisplayGridlines/>
+                </x:WorksheetOptions>
+              </x:ExcelWorksheet>
+            </x:ExcelWorksheets>
+          </x:ExcelWorkbook>
+        </xml>
+        <![endif]-->
+        <style>
+          table { border-collapse: collapse; }
+          th { background-color: #1565C0; color: #ffffff; font-weight: bold; border: 1px solid #dddddd; padding: 8px; font-family: sans-serif; }
+          td { border: 1px solid #dddddd; padding: 6px; font-family: sans-serif; }
+        </style>
+      </head>
+      <body>
+        <table>
+          <thead>
+            <tr>
+              ${headers.map(h => `<th>${h}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredResults.map(res => {
+              const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
+              return `
+                <tr>
+                  <td>${res.profiles?.name || '—'}</td>
+                  <td>${res.profiles?.email || '—'}</td>
+                  <td>${res.profiles?.department || '—'}</td>
+                  <td>${res.profiles?.section || '—'}</td>
+                  <td>${res.exams?.title || '—'}</td>
+                  <td>${res.score}</td>
+                  <td>${res.total_marks}</td>
+                  <td>${percentage}%</td>
+                  <td>${res.violation_count}</td>
+                  <td>${new Date(res.submitted_at).toLocaleString()}</td>
+                  <td>${res.status}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `;
+    
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", fileName);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   if (loading) {
@@ -94,9 +224,36 @@ export default function ViewResults() {
 
   return (
     <div className="app-container">
+      {/* Print Styles */}
+      <style dangerouslySetInnerHTML={{__html: `
+        @media print {
+          .no-print {
+            display: none !important;
+          }
+          .app-container, .container {
+            padding: 0 !important;
+            margin: 0 !important;
+            max-width: 100% !important;
+            box-shadow: none !important;
+          }
+          .dashboard-content {
+            max-width: 100% !important;
+            margin: 0 !important;
+          }
+          .admin-table {
+            border: 1px solid #000 !important;
+          }
+          .admin-table th, .admin-table td {
+            border: 1px solid #ddd !important;
+            padding: 6px !important;
+            font-size: 0.8rem !important;
+          }
+        }
+      `}} />
+
       <div className="container" style={{ paddingBottom: 48 }}>
         <button
-          className="btn btn-secondary"
+          className="btn btn-secondary no-print"
           onClick={() => navigate('/admin')}
           style={{ marginBottom: 24, display: 'flex', alignItems: 'center', gap: 6 }}
         >
@@ -105,71 +262,190 @@ export default function ViewResults() {
         </button>
 
         <div className="dashboard-content">
-          <div className="dashboard-header">
+          <div className="dashboard-header" style={{ marginBottom: 32 }}>
             <div>
               <h2>Examination Results</h2>
               <p>Review completed attempts, scores, and track security logs</p>
             </div>
             
-            <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end' }}>
+            <div className="no-print" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => window.print()}
+                style={{ padding: '8px 16px', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                <Printer size={16} />
+                Print List / PDF
+              </button>
               <button
                 className="btn btn-secondary"
                 onClick={exportToCSV}
-                style={{ padding: '8px 16px', fontSize: '0.85rem' }}
+                style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'var(--lighter-blue)', color: 'var(--primary)', border: '1.5px solid var(--border-light)' }}
               >
                 📥 Export CSV
               </button>
+              <button
+                className="btn btn-secondary"
+                onClick={exportToExcel}
+                style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'rgba(34, 197, 94, 0.1)', color: '#16A34A', border: '1.5px solid rgba(34, 197, 94, 0.3)' }}
+              >
+                📊 Export Excel
+              </button>
+            </div>
+          </div>
 
-              <div style={{ minWidth: 200 }}>
-                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
-                  Filter by Exam
-                </label>
-                <select
-                  className="form-select"
-                  value={selectedExam}
-                  onChange={(e) => handleExamFilterChange(e.target.value)}
-                >
-                  <option value="">All Exams</option>
-                  {exams.map((exam) => (
-                    <option key={exam.id} value={exam.id}>
-                      {exam.title}
-                    </option>
-                  ))}
-                </select>
+          {/* Stats Analytics Dashboard cards */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+            gap: 16,
+            marginBottom: 32
+          }}>
+            <div className="stat-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: '1.6rem', fontWeight: 700, color: 'var(--text)' }}>{totalCount}</div>
+              <div className="stat-label" style={{ fontSize: '0.78rem' }}>Total Attempt Sheets</div>
+            </div>
+            <div className="stat-card" style={{ padding: 16, borderLeft: '3px solid var(--primary)' }}>
+              <div style={{ fontSize: '1.6rem', fontWeight: 700, color: 'var(--primary)' }}>{averagePct}%</div>
+              <div className="stat-label" style={{ fontSize: '0.78rem' }}>Average Score</div>
+            </div>
+            <div className="stat-card" style={{ padding: 16, borderLeft: '3px solid #22C55E' }}>
+              <div style={{ fontSize: '1.6rem', fontWeight: 700, color: '#16A34A' }}>{passRate}%</div>
+              <div className="stat-label" style={{ fontSize: '0.78rem' }}>Pass Rate ({passedCount} Passed)</div>
+            </div>
+            <div className="stat-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {topPerformer ? topPerformer.profiles?.name : '—'}
               </div>
+              <div className="stat-label" style={{ fontSize: '0.78rem' }}>
+                Top Performer ({topPerformer ? `${topPerformer.score}/${topPerformer.total_marks}` : '—'})
+              </div>
+            </div>
+          </div>
+
+          {/* Filters Section */}
+          <div className="no-print" style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+            gap: 16,
+            background: 'var(--lighter-blue)',
+            padding: 16,
+            borderRadius: 'var(--radius-md)',
+            border: '1.5px solid var(--border-light)',
+            marginBottom: 24
+          }}>
+            {/* Search query box */}
+            <div style={{ position: 'relative' }}>
+              <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                Search Student
+              </label>
+              <div style={{ position: 'relative' }}>
+                <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+                <input
+                  type="text"
+                  placeholder="Name or email..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="form-input"
+                  style={{ paddingLeft: 30, marginBottom: 0, fontSize: '0.85rem' }}
+                />
+              </div>
+            </div>
+
+            {/* Exam Select Filter */}
+            <div>
+              <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                Exam Title
+              </label>
+              <select
+                className="form-select"
+                value={selectedExam}
+                onChange={(e) => handleExamFilterChange(e.target.value)}
+                style={{ marginBottom: 0, fontSize: '0.85rem' }}
+              >
+                <option value="">All Exams</option>
+                {exams.map((exam) => (
+                  <option key={exam.id} value={exam.id}>
+                    {exam.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Department Filter */}
+            <div>
+              <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                Department
+              </label>
+              <select
+                className="form-select"
+                value={selectedDept}
+                onChange={(e) => setSelectedDept(e.target.value)}
+                style={{ marginBottom: 0, fontSize: '0.85rem' }}
+              >
+                <option value="">All Departments</option>
+                {uniqueDepts.map((dept) => (
+                  <option key={dept} value={dept}>{dept}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Section Filter */}
+            <div>
+              <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                Section
+              </label>
+              <select
+                className="form-select"
+                value={selectedSection}
+                onChange={(e) => setSelectedSection(e.target.value)}
+                style={{ marginBottom: 0, fontSize: '0.85rem' }}
+              >
+                <option value="">All Sections</option>
+                {uniqueSections.map((sec) => (
+                  <option key={sec} value={sec}>{sec}</option>
+                ))}
+              </select>
             </div>
           </div>
 
           {error && <div className="auth-error">{error}</div>}
 
-          {results.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)' }}>No completed exam attempts found.</p>
+          {filteredResults.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)', padding: '20px 0', textAlign: 'center' }}>No examination results found matching the filters.</p>
           ) : (
             <div className="admin-table-wrapper">
               <table className="admin-table">
                 <thead>
                   <tr>
-                    <th>Student Name</th>
-                    <th>Email</th>
+                    <th>Student</th>
+                    <th>Dept & Sec</th>
                     <th>Exam Title</th>
-                    <th>Score</th>
+                    <th>Score / Max</th>
+                    <th>Percentage</th>
                     <th>Violations</th>
                     <th>Submitted At</th>
-                    <th>Status</th>
+                    <th className="no-print">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((res) => {
-                    const percentage = Math.round((res.score / res.total_marks) * 100) || 0;
+                  {filteredResults.map((res) => {
+                    const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
                     return (
                       <tr key={res.id}>
-                        <td style={{ fontWeight: 600, color: 'var(--text)' }}>
-                          {res.profiles?.name}
+                        <td>
+                          <div style={{ fontWeight: 600, color: 'var(--text)' }}>{res.profiles?.name || '—'}</div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{res.profiles?.email || '—'}</div>
                         </td>
-                        <td>{res.profiles?.email}</td>
-                        <td>{res.exams?.title}</td>
+                        <td>
+                          {res.profiles?.department || '—'} - {res.profiles?.section || '—'}
+                        </td>
+                        <td>{res.exams?.title || '—'}</td>
                         <td style={{ fontWeight: 600 }}>
-                          {res.score} / {res.total_marks} ({percentage}%)
+                          {res.score} / {res.total_marks}
+                        </td>
+                        <td style={{ fontWeight: 600, color: 'var(--primary)' }}>
+                          {percentage}%
                         </td>
                         <td>
                           <span className={res.violation_count > 0 ? 'badge-red' : 'badge-green'}>
@@ -177,10 +453,15 @@ export default function ViewResults() {
                           </span>
                         </td>
                         <td>{new Date(res.submitted_at).toLocaleString()}</td>
-                        <td>
-                          <span style={{ fontSize: '0.85rem', textTransform: 'capitalize' }}>
-                            {res.status.replace('_', ' ')}
-                          </span>
+                        <td className="no-print">
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => navigate(`/student/result/${res.id}`)}
+                            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem' }}
+                          >
+                            <Eye size={14} />
+                            Review
+                          </button>
                         </td>
                       </tr>
                     );

@@ -6,16 +6,19 @@ export default function ActivityFeed() {
   const [events, setEvents] = useState([]);
 
   useEffect(() => {
+    let failCount = 0;
     const load = async () => {
       try {
         const data = await api('/api/activity-feed');
+        failCount = 0;
         setEvents(data.events || []);
       } catch (e) {
-        console.error('Activity feed error:', e);
+        failCount++;
+        if (failCount === 1) console.warn('Activity feed: backend unreachable, retrying silently.');
       }
     };
     load();
-    const interval = setInterval(load, 2500);
+    const interval = setInterval(load, 5000);
     return () => clearInterval(interval);
   }, []);
 

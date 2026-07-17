@@ -76,6 +76,9 @@ export default function LiveMonitor() {
       return () => clearInterval(pollInterval);
     }
 
+    // Local profile cache to prevent redundant fetches
+    const profileCache = {};
+
     // Otherwise, listen to live event logs via real Supabase WebSockets
     const eventChannel = supabase
       .channel('schema-db-changes')
@@ -84,15 +87,22 @@ export default function LiveMonitor() {
         { event: 'INSERT', schema: 'public', table: 'event_logs' },
         async (payload) => {
           try {
-            const userProfile = await supabase
-              .from('profiles')
-              .select('name, email')
-              .eq('id', payload.new.user_id)
-              .single();
+            let profileData = profileCache[payload.new.user_id];
+            if (!profileData) {
+              const userProfile = await supabase
+                .from('profiles')
+                .select('name, email')
+                .eq('id', payload.new.user_id)
+                .single();
+              if (userProfile.data) {
+                profileData = userProfile.data;
+                profileCache[payload.new.user_id] = profileData;
+              }
+            }
               
             const formattedEvent = {
               ...payload.new,
-              profiles: userProfile.data,
+              profiles: profileData || { name: 'Student', email: '' },
               created_at: new Date().toISOString()
             };
 
@@ -119,14 +129,31 @@ export default function LiveMonitor() {
         { event: '*', schema: 'public', table: 'attempts' },
         async (payload) => {
           try {
-            const activeData = await api('/api/monitor/live');
-            setActiveAttempts(activeData.active_attempts);
+            // Only trigger API fetch on INSERT (new exam attempt) or if the status actually changed
+            const isInsert = payload.eventType === 'INSERT';
+            const isStatusChange = payload.eventType === 'UPDATE' && payload.new.status !== payload.old.status;
             
-            const statsData = await api('/api/monitor/stats');
-            setStats({
-              active_attempts: statsData.active_attempts,
-              total_violations: statsData.total_violations
-            });
+            if (isInsert || isStatusChange) {
+              const [activeData, statsData] = await Promise.all([
+                api('/api/monitor/live'),
+                api('/api/monitor/stats')
+              ]);
+              setActiveAttempts(activeData.active_attempts);
+              
+              setStats({
+                active_attempts: statsData.active_attempts,
+                total_violations: statsData.total_violations
+              });
+            } else if (payload.eventType === 'UPDATE' && payload.new.violation_count !== payload.old.violation_count) {
+              // Update violation count locally in state to avoid unnecessary database hits
+              setActiveAttempts((prevAttempts) =>
+                prevAttempts.map((att) =>
+                  att.id === payload.new.id
+                    ? { ...att, violation_count: payload.new.violation_count }
+                    : att
+                )
+              );
+            }
           } catch (e) {
             console.error(e);
           }
