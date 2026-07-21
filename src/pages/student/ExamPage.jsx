@@ -31,6 +31,7 @@ export default function ExamPage() {
   useEffect(() => {
     async function loadExam() {
       try {
+        setError('');
         const attemptData = await api(`/api/attempts/${attemptId}`);
         if (attemptData.attempt.status === 'terminated') {
           navigate(`/student/exam-terminated?attempt_id=${attemptId}&reason=${encodeURIComponent('This exam session has been terminated due to security violations.')}`, { replace: true });
@@ -57,15 +58,21 @@ export default function ExamPage() {
         setViolations(attemptData.attempt.violation_count || 0);
 
         // Fetch any answers saved previously (if resuming)
-        const resultData = await api(`/api/attempts/${attemptId}/result`);
-        const savedAnswers = {};
-        resultData.answers.forEach((ans) => {
-          if (ans.selected_option !== null && ans.selected_option !== undefined) {
-            savedAnswers[ans.question_id] = ans.selected_option;
-          } else if (ans.selected_answer_text !== null && ans.selected_answer_text !== undefined) {
-            savedAnswers[ans.question_id] = ans.selected_answer_text;
+        let savedAnswers = {};
+        try {
+          const resultData = await api(`/api/attempts/${attemptId}/result`);
+          if (resultData && resultData.answers) {
+            resultData.answers.forEach((ans) => {
+              if (ans.selected_option !== null && ans.selected_option !== undefined) {
+                savedAnswers[ans.question_id] = ans.selected_option;
+              } else if (ans.selected_answer_text !== null && ans.selected_answer_text !== undefined) {
+                savedAnswers[ans.question_id] = ans.selected_answer_text;
+              }
+            });
           }
-        });
+        } catch (e) {
+          console.warn('Could not fetch server saved answers, using local backup.', e);
+        }
 
         // Merge with local storage backup to ensure zero data loss across refreshes/reconnects
         let localBackup = {};
@@ -75,6 +82,7 @@ export default function ExamPage() {
 
         const merged = { ...savedAnswers, ...localBackup };
         setAnswers(merged);
+        setError('');
       } catch (err) {
         setError(err.message || 'Failed to load exam data');
       } finally {
@@ -365,7 +373,7 @@ export default function ExamPage() {
           </div>
         )}
 
-        {error && <div className="auth-error">{error}</div>}
+        {error && questions.length === 0 && <div className="auth-error">{error}</div>}
 
         {questions.length > 0 && currentQuestion && (
           <div className="exam-body-grid">
