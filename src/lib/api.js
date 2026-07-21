@@ -29,7 +29,7 @@ function getToken() {
 }
 
 export async function api(endpoint, options = {}) {
-  const { method = 'GET', body, params } = options;
+  const { method = 'GET', body, params, retries = 3 } = options;
 
   let url = `${API_URL}${endpoint}`;
   if (params) {
@@ -45,35 +45,56 @@ export async function api(endpoint, options = {}) {
   const config = { method, headers };
   if (body) config.body = JSON.stringify(body);
 
-  let response;
-  try {
-    response = await fetch(url, config);
-  } catch (_networkErr) {
-    // Backend unreachable — Vite proxy or direct connection failed
-    throw new Error('Cannot connect to the server. Please make sure the backend is running.');
-  }
+  let attemptCount = 0;
+  let lastError;
 
-  const text = await response.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    throw new Error(text || `Server error (${response.status})`);
-  }
+  while (attemptCount < retries) {
+    attemptCount++;
+    try {
+      const response = await fetch(url, config);
 
-  if (!response.ok) {
-    // Session expired — clear storage and redirect to login
-    if (response.status === 401) {
-      localStorage.removeItem('soems_session');
-      if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
-        window.location.href = '/login';
+      // Handle server error retries (502, 503, 504)
+      if (response.status >= 502 && response.status <= 504 && attemptCount < retries) {
+        const delay = Math.pow(2, attemptCount - 1) * 300;
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
       }
-      throw new Error('Session expired — please log in again');
+
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error(text || `Server error (${response.status})`);
+      }
+
+      if (!response.ok) {
+        // Session expired — clear storage and redirect to login
+        if (response.status === 401) {
+          localStorage.removeItem('soems_session');
+          if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+            window.location.href = '/login';
+          }
+          throw new Error('Session expired — please log in again');
+        }
+        throw new Error(data.detail || 'API request failed');
+      }
+
+      return data;
+    } catch (err) {
+      lastError = err;
+      // Don't retry auth errors or client-side HTTP error details
+      if (err.message && (err.message.includes('Session expired') || err.message.includes('401') || err.message.includes('403') || err.message.includes('404') || err.message.includes('400'))) {
+        throw err;
+      }
+      if (attemptCount < retries) {
+        const delay = Math.pow(2, attemptCount - 1) * 300;
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
-    throw new Error(data.detail || 'API request failed');
   }
 
-  return data;
+  throw lastError || new Error('Cannot connect to the server. Please make sure the backend is running.');
 }
 
 export default api;

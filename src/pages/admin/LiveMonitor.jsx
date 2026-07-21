@@ -13,32 +13,35 @@ import '../../proctor.css';
 export default function LiveMonitor() {
   const navigate = useNavigate();
   
-  const [activeAttempts, setActiveAttempts] = useState([]);
+  const [students, setStudents] = useState([]);
   const [events, setEvents] = useState([]);
   const [stats, setStats] = useState({ active_attempts: 0, total_violations: 0 });
+  const [kickedCount, setKickedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  
-  const activeAttemptsRef = useRef([]);
-  activeAttemptsRef.current = activeAttempts;
+
+  const refreshAll = async () => {
+    try {
+      const [liveData, eventsData, statsData, kickData] = await Promise.all([
+        api('/api/live-students'),
+        api('/api/activity-feed'),
+        api('/api/monitor/stats'),
+        api('/api/kick-history')
+      ]);
+      setStudents(liveData.live_students || []);
+      setEvents(eventsData.events || []);
+      setStats(statsData);
+      setKickedCount(kickData.kick_logs?.length || 0);
+    } catch (err) {
+      setError(err.message || 'Failed to connect to monitor api');
+    }
+  };
 
   // 1. Initial Load of active attempts, stats, and recent events
   useEffect(() => {
     async function loadInitialData() {
       try {
-        const [activeData, eventsData, statsData] = await Promise.all([
-          api('/api/monitor/live'),
-          api('/api/monitor/events?limit=25'),
-          api('/api/monitor/stats')
-        ]);
-        setActiveAttempts(activeData.active_attempts);
-        setEvents(eventsData.events);
-        setStats({
-          active_attempts: statsData.active_attempts,
-          total_violations: statsData.total_violations
-        });
-      } catch (err) {
-        setError(err.message || 'Failed to connect to monitor api');
+        await refreshAll();
       } finally {
         setLoading(false);
       }
@@ -54,109 +57,40 @@ export default function LiveMonitor() {
                    import.meta.env.VITE_SUPABASE_URL.includes('placeholder-project');
 
     if (isMock) {
-      // In offline mock mode, poll database API endpoints every 2 seconds
+      // In offline mock mode, poll database API endpoints every 10 seconds (consolidated)
       const pollInterval = setInterval(async () => {
         try {
-          const [activeData, eventsData, statsData] = await Promise.all([
-            api('/api/monitor/live'),
-            api('/api/monitor/events?limit=25'),
-            api('/api/monitor/stats')
-          ]);
-          setActiveAttempts(activeData.active_attempts);
-          setEvents(eventsData.events);
-          setStats({
-            active_attempts: statsData.active_attempts,
-            total_violations: statsData.total_violations
-          });
+          await refreshAll();
         } catch (e) {
           console.error("Polling error in mock mode:", e);
         }
-      }, 2000);
+      }, 10000);
 
       return () => clearInterval(pollInterval);
     }
 
-    // Local profile cache to prevent redundant fetches
-    const profileCache = {};
-
-    // Otherwise, listen to live event logs via real Supabase WebSockets
+    // Otherwise, listen to database changes via real Supabase WebSockets
     const eventChannel = supabase
       .channel('schema-db-changes')
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'event_logs' },
-        async (payload) => {
-          try {
-            let profileData = profileCache[payload.new.user_id];
-            if (!profileData) {
-              const userProfile = await supabase
-                .from('profiles')
-                .select('name, email')
-                .eq('id', payload.new.user_id)
-                .single();
-              if (userProfile.data) {
-                profileData = userProfile.data;
-                profileCache[payload.new.user_id] = profileData;
-              }
-            }
-              
-            const formattedEvent = {
-              ...payload.new,
-              profiles: profileData || { name: 'Student', email: '' },
-              created_at: new Date().toISOString()
-            };
-
-            setEvents((prev) => [formattedEvent, ...prev.slice(0, 49)]);
-
-            if (['tab_switch', 'window_blur', 'violation'].includes(payload.new.event_type)) {
-              setStats((prev) => ({ ...prev, total_violations: prev.total_violations + 1 }));
-              
-              setActiveAttempts((prevAttempts) =>
-                prevAttempts.map((att) =>
-                  att.id === payload.new.attempt_id
-                    ? { ...att, violation_count: (att.violation_count || 0) + 1 }
-                    : att
-                )
-              );
-            }
-          } catch (e) {
-            console.error('Realtime payload handling error:', e);
-          }
+        { event: '*', schema: 'public', table: 'event_logs' },
+        async () => {
+          refreshAll();
         }
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'attempts' },
-        async (payload) => {
-          try {
-            // Only trigger API fetch on INSERT (new exam attempt) or if the status actually changed
-            const isInsert = payload.eventType === 'INSERT';
-            const isStatusChange = payload.eventType === 'UPDATE' && payload.new.status !== payload.old.status;
-            
-            if (isInsert || isStatusChange) {
-              const [activeData, statsData] = await Promise.all([
-                api('/api/monitor/live'),
-                api('/api/monitor/stats')
-              ]);
-              setActiveAttempts(activeData.active_attempts);
-              
-              setStats({
-                active_attempts: statsData.active_attempts,
-                total_violations: statsData.total_violations
-              });
-            } else if (payload.eventType === 'UPDATE' && payload.new.violation_count !== payload.old.violation_count) {
-              // Update violation count locally in state to avoid unnecessary database hits
-              setActiveAttempts((prevAttempts) =>
-                prevAttempts.map((att) =>
-                  att.id === payload.new.id
-                    ? { ...att, violation_count: payload.new.violation_count }
-                    : att
-                )
-              );
-            }
-          } catch (e) {
-            console.error(e);
-          }
+        async () => {
+          refreshAll();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'kick_logs' },
+        async () => {
+          refreshAll();
         }
       )
       .subscribe();
@@ -227,21 +161,21 @@ export default function LiveMonitor() {
 
           {error && <div className="auth-error">{error}</div>}
 
-          <AdminLiveCards />
+          <AdminLiveCards students={students} stats={stats} kickedCount={kickedCount} />
 
           <h3 style={{ marginBottom: 16, borderBottom: '1.5px solid var(--border-light)', paddingBottom: 10 }}>
             Active Exam Sessions
           </h3>
 
-          <LiveStudentTable />
+          <LiveStudentTable students={students} loading={loading} onAction={refreshAll} />
 
           <h3 style={{ marginBottom: 16, borderBottom: '1.5px solid var(--border-light)', paddingBottom: 10 }}>
             Live Security Event Logs (WebSocket)
           </h3>
 
-          <ActivityFeed />
+          <ActivityFeed events={events} />
 
-          <AdminNotifications />
+          <AdminNotifications events={events} />
         </div>
       </div>
     </div>

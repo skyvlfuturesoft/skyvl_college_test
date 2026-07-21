@@ -3,7 +3,7 @@ import { api } from '../../lib/api';
 import { Users, Radio, AlertTriangle, ShieldAlert, CheckSquare, Award, Clock, HelpCircle, Activity, Globe } from 'lucide-react';
 import '../../proctor.css';
 
-export default function AdminLiveCards() {
+export default function AdminLiveCards({ students = [], stats = {}, kickedCount = 0 }) {
   const [liveStats, setLiveStats] = useState({
     online: 0,
     active: 0,
@@ -17,52 +17,25 @@ export default function AdminLiveCards() {
     networkLogs: 0
   });
 
-  const loadStats = async () => {
-    try {
-      const [liveData, statsData, kickData] = await Promise.all([
-        api('/api/live-students'),
-        api('/api/monitor/stats'),
-        api('/api/kick-history')
-      ]);
-
-      const students = liveData.live_students || [];
-      const offlineCount = students.filter(s => s.connection_status === 'disconnected').length;
-      const uniqueExams = new Set(students.map(s => s.exam_name)).size;
-      const totalProgress = students.reduce((acc, s) => acc + (s.progress_percent || 0), 0);
-      const avgProgress = students.length > 0 ? Math.round(totalProgress / students.length) : 0;
-
-      setLiveStats({
-        online: students.length,
-        active: statsData.active_attempts || 0,
-        completed: statsData.completed_attempts || 0,
-        kicked: kickData.kick_logs?.length || 0,
-        violations: statsData.total_violations || 0,
-        offline: offlineCount,
-        exams: uniqueExams,
-        avgProgress: avgProgress,
-        avgScore: 78, // mock constant or aggregated
-        networkLogs: offlineCount // mock
-      });
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   useEffect(() => {
-    let failCount = 0;
-    const pollStats = async () => {
-      try {
-        await loadStats();
-        failCount = 0;
-      } catch (e) {
-        failCount++;
-        if (failCount === 1) console.warn('AdminLiveCards: backend unreachable, retrying silently.');
-      }
-    };
-    pollStats();
-    const interval = setInterval(pollStats, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    const offlineCount = students.filter(s => s.connection_status === 'disconnected').length;
+    const uniqueExams = new Set(students.map(s => s.exam_name)).size;
+    const totalProgress = students.reduce((acc, s) => acc + (s.progress_percent || 0), 0);
+    const avgProgress = students.length > 0 ? Math.round(totalProgress / students.length) : 0;
+
+    setLiveStats({
+      online: students.length,
+      active: stats.active_attempts || 0,
+      completed: stats.completed_attempts || 0,
+      kicked: kickedCount,
+      violations: stats.total_violations || 0,
+      offline: offlineCount,
+      exams: uniqueExams,
+      avgProgress: avgProgress,
+      avgScore: 78, // mock constant or aggregated
+      networkLogs: offlineCount
+    });
+  }, [students, stats, kickedCount]);
 
   return (
     <div style={{

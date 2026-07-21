@@ -2,25 +2,7 @@ import { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
 import '../../proctor.css';
 
-export default function ActivityFeed() {
-  const [events, setEvents] = useState([]);
-
-  useEffect(() => {
-    let failCount = 0;
-    const load = async () => {
-      try {
-        const data = await api('/api/activity-feed');
-        failCount = 0;
-        setEvents(data.events || []);
-      } catch (e) {
-        failCount++;
-        if (failCount === 1) console.warn('Activity feed: backend unreachable, retrying silently.');
-      }
-    };
-    load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
-  }, []);
+export default function ActivityFeed({ events = [] }) {
 
   const getEmoji = (type) => {
     if (!type) return '📋';

@@ -1,43 +1,30 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
 import { X, AlertTriangle, ShieldAlert, CheckCircle, Radio } from 'lucide-react';
 import '../../proctor.css';
 
-export default function AdminNotifications() {
+export default function AdminNotifications({ events = [] }) {
   const [toasts, setToasts] = useState([]);
+  const prevEventsLength = useRef(events.length);
 
   useEffect(() => {
-    let lastCount = 0;
+    if (events.length > prevEventsLength.current) {
+      const newEvents = events.slice(0, events.length - prevEventsLength.current);
+      newEvents.forEach((evt) => {
+        const type = evt.activity_type || '';
+        let toastType = 'start';
+        if (type.includes('violation') || type.includes('warning')) toastType = 'violation';
+        else if (type.includes('kicked')) toastType = 'kick';
+        else if (type.includes('submitted')) toastType = 'submit';
 
-    const poll = async () => {
-      try {
-        const data = await api('/api/activity-feed');
-        const events = data.events || [];
-        if (events.length > lastCount && lastCount > 0) {
-          const newEvents = events.slice(0, events.length - lastCount);
-          newEvents.forEach((evt) => {
-            const type = evt.activity_type || '';
-            let toastType = 'start';
-            if (type.includes('violation') || type.includes('warning')) toastType = 'violation';
-            else if (type.includes('kicked')) toastType = 'kick';
-            else if (type.includes('submitted')) toastType = 'submit';
-
-            setToasts((prev) => [
-              { id: evt.id, message: evt.message, type: toastType, time: new Date(evt.created_at) },
-              ...prev.slice(0, 4)
-            ]);
-          });
-        }
-        lastCount = events.length;
-      } catch (e) {
-        // Silently fail polling
-      }
-    };
-
-    poll();
-    const interval = setInterval(poll, 3000);
-    return () => clearInterval(interval);
-  }, []);
+        setToasts((prev) => [
+          { id: evt.id || Math.random(), message: evt.message, type: toastType, time: new Date(evt.created_at) },
+          ...prev.slice(0, 4)
+        ]);
+      });
+    }
+    prevEventsLength.current = events.length;
+  }, [events]);
 
   // Auto dismiss after 6 seconds
   useEffect(() => {

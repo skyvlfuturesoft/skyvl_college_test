@@ -9,22 +9,17 @@ export default function StudentDashboard() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const { data: examsData, isLoading: isExamsLoading, error: examsError } = useQuery({
-    queryKey: ['studentExams'],
-    queryFn: () => api('/api/exams'),
-    staleTime: 10000,
+  const { data: dashboardData, isLoading, error: dashboardError } = useQuery({
+    queryKey: ['studentDashboard'],
+    queryFn: () => api('/api/student/dashboard'),
+    staleTime: 300000, // 5 minutes stale time
+    refetchInterval: 60000, // Poll every 60s
   });
 
-  const { data: attemptsData, isLoading: isAttemptsLoading, error: attemptsError } = useQuery({
-    queryKey: ['studentAttempts'],
-    queryFn: () => api('/api/my-attempts'),
-    staleTime: 5000,
-  });
-
-  const exams = examsData?.exams || [];
-  const attempts = attemptsData?.attempts || [];
-  const loading = isExamsLoading || isAttemptsLoading;
-  const error = examsError?.message || attemptsError?.message || '';
+  const exams = dashboardData?.exams || [];
+  const attempts = dashboardData?.attempts || [];
+  const loading = isLoading;
+  const error = dashboardError?.message || '';
 
   const handleStartExam = async (examId) => {
     try {

@@ -25,6 +25,8 @@ export default function ExamPage() {
   
   const warningRef = useRef(false);
   const timerRef = useRef(null);
+  const endTimeRef = useRef(0);
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     async function loadExam() {
@@ -41,12 +43,13 @@ export default function ExamPage() {
         
         const qData = await api(`/api/exams/${attemptData.attempt.exam_id}/questions`);
         
-        // Calculate remaining seconds
+        // Calculate remaining seconds based on server started_at timestamp to prevent drift
         const start = new Date(attemptData.attempt.started_at).getTime();
-        const duration = attemptData.attempt.exams.duration * 60; // seconds
-        const now = new Date().getTime();
-        const elapsed = Math.floor((now - start) / 1000);
-        const remaining = Math.max(0, duration - elapsed);
+        const durationMs = attemptData.attempt.exams.duration * 60 * 1000;
+        endTimeRef.current = start + durationMs;
+
+        const now = Date.now();
+        const remaining = Math.max(0, Math.floor((endTimeRef.current - now) / 1000));
         
         setAttempt(attemptData.attempt);
         setQuestions(qData.questions);
@@ -63,7 +66,15 @@ export default function ExamPage() {
             savedAnswers[ans.question_id] = ans.selected_answer_text;
           }
         });
-        setAnswers(savedAnswers);
+
+        // Merge with local storage backup to ensure zero data loss across refreshes/reconnects
+        let localBackup = {};
+        try {
+          localBackup = JSON.parse(localStorage.getItem(`exam_answers_${attemptId}`) || '{}');
+        } catch (e) {}
+
+        const merged = { ...savedAnswers, ...localBackup };
+        setAnswers(merged);
       } catch (err) {
         setError(err.message || 'Failed to load exam data');
       } finally {
@@ -83,19 +94,20 @@ export default function ExamPage() {
     isPaused
   } = useExamProctor(attemptId, currentIdx, answers, timeLeft, () => submitExam(true), violations);
 
-  // Timer loop
+  // Timer loop with drift prevention
   useEffect(() => {
     if (loading || timeLeft <= 0 || submitting || isPaused) return;
 
     timerRef.current = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(timerRef.current);
-          handleAutoSubmit();
-          return 0;
-        }
-        return prev - 1;
-      });
+      if (!endTimeRef.current) return;
+      const now = Date.now();
+      const remaining = Math.max(0, Math.floor((endTimeRef.current - now) / 1000));
+      setTimeLeft(remaining);
+
+      if (remaining <= 0) {
+        clearInterval(timerRef.current);
+        handleAutoSubmit();
+      }
     }, 1000);
 
     return () => clearInterval(timerRef.current);
@@ -104,8 +116,18 @@ export default function ExamPage() {
   const dirtyAnswersRef = useRef({});
   const savingRef = useRef(false);
 
+  const saveLocalBackup = (newAnswers) => {
+    try {
+      localStorage.setItem(`exam_answers_${attemptId}`, JSON.stringify(newAnswers));
+    } catch (e) {}
+  };
+
   const handleSelectOptionText = (qId, value) => {
-    setAnswers((prev) => ({ ...prev, [qId]: value }));
+    setAnswers((prev) => {
+      const updated = { ...prev, [qId]: value };
+      saveLocalBackup(updated);
+      return updated;
+    });
     dirtyAnswersRef.current[qId] = value;
   };
 
@@ -141,14 +163,15 @@ export default function ExamPage() {
           }
         }
         
-        await api('/api/events/log', {
+        // Log event non-blockingly so it doesn't interrupt answer saving
+        api('/api/events/log', {
           method: 'POST',
           body: {
             attempt_id: attemptId,
             event_type: 'answer_saved',
             details: { question_id: qId, option_index: isMcq ? val : null, answer_text: isMcq ? null : val }
           }
-        });
+        }).catch(() => {});
       });
       
       await Promise.all(promises);
@@ -167,18 +190,24 @@ export default function ExamPage() {
   useEffect(() => {
     const autoSaveTimer = setInterval(() => {
       saveDirtyAnswers();
-    }, 30000);
+    }, 15000);
     return () => clearInterval(autoSaveTimer);
   }, []);
 
   const handleSelectOption = (optionIdx) => {
     const q = questions[currentIdx];
-    setAnswers((prev) => ({ ...prev, [q.id]: optionIdx }));
+    if (!q) return;
+    setAnswers((prev) => {
+      const updated = { ...prev, [q.id]: optionIdx };
+      saveLocalBackup(updated);
+      return updated;
+    });
     dirtyAnswersRef.current[q.id] = optionIdx;
   };
 
   const submitExam = async (isAuto = false) => {
-    if (submitting) return;
+    if (submitting || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     clearInterval(timerRef.current);
 
@@ -187,10 +216,14 @@ export default function ExamPage() {
 
     try {
       await api(`/api/attempts/${attemptId}/submit?auto=${isAuto}`, { method: 'POST' });
+      try {
+        localStorage.removeItem(`exam_answers_${attemptId}`);
+      } catch (e) {}
       navigate(`/student/result/${attemptId}`, { replace: true });
     } catch (err) {
       setError(err.message || 'Submission failed');
       setSubmitting(false);
+      submittingRef.current = false;
     }
   };
 

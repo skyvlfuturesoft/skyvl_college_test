@@ -25,12 +25,11 @@ ON CONFLICT (id) DO NOTHING;
 
 -- RLS policies for storage bucket object access
 DROP POLICY IF EXISTS "Public Storage Access" ON storage.objects;
-CREATE POLICY "Public Storage Access" ON storage.objects 
-  FOR SELECT USING (bucket_id = 'exam-images');
-
 DROP POLICY IF EXISTS "Admins manage objects" ON storage.objects;
-CREATE POLICY "Admins manage objects" ON storage.objects 
-  FOR ALL USING (
-    bucket_id = 'exam-images' AND 
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'admin')
-  );
+DROP POLICY IF EXISTS "Give public full access to exam-images" ON storage.objects;
+
+CREATE POLICY "Give public full access to exam-images" ON storage.objects
+  FOR ALL
+  TO public, anon, authenticated
+  USING (bucket_id = 'exam-images')
+  WITH CHECK (bucket_id = 'exam-images');

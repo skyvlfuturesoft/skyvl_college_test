@@ -7,8 +7,12 @@ v1.1.0 — Supabase exam-images storage bucket enabled
 import os
 from datetime import datetime, timezone
 from typing import Optional
+import asyncio
+import time
+from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Header, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, Header, File, UploadFile, BackgroundTasks
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -33,9 +37,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# File uploads are handled in-memory for serverless compatibility
+# ── In-Memory High-Performance TTL Cache Store ──
+class TTLCache:
+    def __init__(self, ttl_seconds: float = 10.0):
+        self.ttl = ttl_seconds
+        self.store = {}
 
-import uuid
+    def get(self, key):
+        if key in self.store:
+            val, timestamp = self.store[key]
+            if time.time() - timestamp < self.ttl:
+                return val
+            else:
+                del self.store[key]
+        return None
+
+    def set(self, key, val, ttl: Optional[float] = None):
+        expire_ttl = ttl if ttl is not None else self.ttl
+        self.store[key] = (val, time.time())
+
+    def invalidate(self, key_prefix: str = ""):
+        if not key_prefix:
+            self.store.clear()
+        else:
+            to_del = [k for k in self.store if k.startswith(key_prefix)]
+            for k in to_del:
+                del self.store[k]
+
+exam_cache = TTLCache(ttl_seconds=10.0)      # Exam & questions metadata cache
+profile_cache = TTLCache(ttl_seconds=60.0)   # Profile auth cache
+attempt_cache = TTLCache(ttl_seconds=15.0)   # Attempt status cache
+
+# Submission locks per attempt to prevent race conditions
+_submit_locks = {}
+_submit_locks_guard = asyncio.Lock()
+
+async def get_attempt_lock(attempt_id: str) -> asyncio.Lock:
+    async with _submit_locks_guard:
+        if attempt_id not in _submit_locks:
+            _submit_locks[attempt_id] = asyncio.Lock()
+        return _submit_locks[attempt_id]
 
 # ── Supabase Credentials & Fallback Detection ──
 IS_MOCK_MODE = (
@@ -524,18 +565,24 @@ async def get_current_user(authorization: str = Header(...)):
                 name = user_metadata.get("name", email.split("@")[0] if email else "User")
                 
                 if user_id and email:
-                    # If role not in JWT claims, fetch from profiles table directly
+                    # If role not in JWT claims, fetch from profiles table directly (cached)
                     if not role:
-                        try:
-                            sb_service = get_supabase()
-                            profile_res = sb_service.table("profiles").select("role, name").eq("id", user_id).single().execute()
-                            if profile_res.data:
-                                role = profile_res.data.get("role", "student")
-                                name = profile_res.data.get("name") or name
-                            else:
+                        cached_prof = profile_cache.get(f"profile:{user_id}")
+                        if cached_prof:
+                            role = cached_prof.get("role", "student")
+                            name = cached_prof.get("name") or name
+                        else:
+                            try:
+                                sb_service = get_supabase()
+                                profile_res = sb_service.table("profiles").select("role, name").eq("id", user_id).single().execute()
+                                if profile_res.data:
+                                    role = profile_res.data.get("role", "student")
+                                    name = profile_res.data.get("name") or name
+                                    profile_cache.set(f"profile:{user_id}", {"role": role, "name": name}, ttl=60.0)
+                                else:
+                                    role = "student"
+                            except Exception:
                                 role = "student"
-                        except Exception:
-                            role = "student"
                     return {
                         "id": user_id,
                         "email": email,
@@ -626,6 +673,10 @@ class QuestionCreate(BaseModel):
     correct_answer: Optional[int] = 0
     accepted_answers: Optional[list[str]] = []
     marks: int = 1
+
+class QuestionsBulkCreate(BaseModel):
+    exam_id: str
+    questions: list[QuestionCreate]
 
 class AnswerSubmit(BaseModel):
     question_id: str
@@ -852,18 +903,29 @@ async def create_exam(data: ExamCreate, user=Depends(require_admin)):
 
 @app.put("/api/exams/{exam_id}")
 async def update_exam(exam_id: str, data: ExamUpdate, user=Depends(require_admin)):
+    exam_cache.invalidate(f"exam:{exam_id}")
+    exam_cache.invalidate(f"questions:{exam_id}")
     sb = get_supabase()
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = sb.table("exams").update(update_data).eq("id", exam_id).execute()
+    result = await run_in_threadpool(lambda: sb.table("exams").update(update_data).eq("id", exam_id).execute())
     return {"exam": result.data[0] if result.data else None}
 
 @app.get("/api/exams/{exam_id}")
 async def get_exam(exam_id: str, user=Depends(get_current_user)):
+    cache_key = f"exam:{exam_id}"
+    cached = exam_cache.get(cache_key)
+    if cached:
+        return {"exam": cached}
+
     sb = get_supabase()
-    result = sb.table("exams").select("id, title, description, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations").eq("id", exam_id).single().execute()
+    result = await run_in_threadpool(
+        lambda: sb.table("exams").select("id, title, description, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations").eq("id", exam_id).single().execute()
+    )
     if not result.data:
         raise HTTPException(status_code=404, detail="Exam not found")
+
+    exam_cache.set(cache_key, result.data, ttl=10.0)
     return {"exam": result.data}
 
 
@@ -873,22 +935,36 @@ async def get_exam(exam_id: str, user=Depends(get_current_user)):
 
 @app.get("/api/exams/{exam_id}/questions")
 async def get_questions(exam_id: str, user=Depends(get_current_user)):
-    sb = get_supabase()
-    try:
-        result = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, accepted_answers, question_type, image_url, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
-        questions = result.data or []
-    except Exception:
-        # Fallback if migration_v6 columns do not exist in questions table
-        result = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
-        questions = result.data or []
-        for q in questions:
-            q["accepted_answers"] = []
-            q["question_type"] = "mcq"
-            q["image_url"] = None
+    cache_key = f"questions:{exam_id}"
+    raw_questions = exam_cache.get(cache_key)
+
+    if not raw_questions:
+        sb = get_supabase()
+        def _fetch_questions():
+            try:
+                res = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, accepted_answers, question_type, image_url, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
+                return res.data or []
+            except Exception:
+                res = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
+                qs = res.data or []
+                for q in qs:
+                    q["accepted_answers"] = []
+                    q["question_type"] = "mcq"
+                    q["image_url"] = None
+                return qs
+
+        raw_questions = await run_in_threadpool(_fetch_questions)
+        exam_cache.set(cache_key, raw_questions, ttl=10.0)
+
+    import copy
+    questions = copy.deepcopy(raw_questions)
 
     # Randomize questions order seeded per student attempt
     if user["role"] != "admin":
-        attempt = sb.table("attempts").select("id").eq("student_id", user["id"]).eq("exam_id", exam_id).eq("status", "in_progress").execute()
+        sb = get_supabase()
+        attempt = await run_in_threadpool(
+            lambda: sb.table("attempts").select("id").eq("student_id", user["id"]).eq("exam_id", exam_id).eq("status", "in_progress").execute()
+        )
         if attempt.data:
             import random
             attempt_id = attempt.data[0]["id"]
@@ -933,6 +1009,44 @@ async def create_question(data: QuestionCreate, user=Depends(require_admin)):
             result.data[0]["accepted_answers"] = []
             
     return {"question": result.data[0] if result.data else None}
+
+@app.post("/api/questions/bulk")
+async def create_questions_bulk(data: QuestionsBulkCreate, user=Depends(require_admin)):
+    sb = get_supabase()
+    payloads = []
+    for q in data.questions:
+        payloads.append({
+            "exam_id": data.exam_id,
+            "question_text": q.question_text,
+            "options": q.options,
+            "correct_answer": q.correct_answer,
+            "marks": q.marks,
+            "question_type": q.question_type,
+            "image_url": q.image_url,
+            "accepted_answers": q.accepted_answers
+        })
+    try:
+        result = sb.table("questions").insert(payloads).execute()
+        questions = result.data or []
+    except Exception:
+        # Fallback if migration_v6 columns do not exist
+        fallback_payloads = []
+        for p in payloads:
+            fallback_payloads.append({
+                "exam_id": p["exam_id"],
+                "question_text": p["question_text"],
+                "options": p["options"],
+                "correct_answer": p["correct_answer"],
+                "marks": p["marks"]
+            })
+        result = sb.table("questions").insert(fallback_payloads).execute()
+        questions = result.data or []
+        for q in questions:
+            q["question_type"] = "mcq"
+            q["image_url"] = None
+            q["accepted_answers"] = []
+            
+    return {"success": True, "questions": questions}
 
 @app.delete("/api/questions/{question_id}")
 async def delete_question(question_id: str, user=Depends(require_admin)):
@@ -1035,69 +1149,91 @@ async def start_attempt(exam_id: str, user=Depends(get_current_user)):
 
 @app.post("/api/attempts/{attempt_id}/answer")
 async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_current_user)):
+    cache_key = f"attempt:{attempt_id}"
+    attempt = attempt_cache.get(cache_key)
+
     sb = get_supabase()
-    
-    # Verify attempt belongs to user and is in progress
-    # Use two separate filters for mock compatibility (dict key uniqueness)
-    attempt_res = sb.table("attempts").select("id, student_id, status, started_at, exam_id").eq("id", attempt_id).single().execute()
-    if not attempt_res.data:
-        raise HTTPException(status_code=400, detail="Attempt not found")
-    attempt = attempt_res.data
+    if not attempt:
+        attempt_res = await run_in_threadpool(
+            lambda: sb.table("attempts").select("id, student_id, status, started_at, exam_id").eq("id", attempt_id).single().execute()
+        )
+        if not attempt_res.data:
+            raise HTTPException(status_code=400, detail="Attempt not found")
+        attempt = attempt_res.data
+        attempt_cache.set(cache_key, attempt, ttl=15.0)
+
     if attempt.get("student_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Not your attempt")
     if attempt.get("status") != "in_progress":
         raise HTTPException(status_code=400, detail="Attempt is not in progress")
-    
-    # Check timer hasn't expired (safe parse)
-    try:
-        exam = sb.table("exams").select("duration").eq("id", attempt["exam_id"]).single().execute()
-        if exam.data:
+
+    # Check timer using exam duration cache
+    exam_id = attempt["exam_id"]
+    exam_cache_key = f"exam:{exam_id}"
+    exam_data = exam_cache.get(exam_cache_key)
+    if not exam_data:
+        exam_res = await run_in_threadpool(
+            lambda: sb.table("exams").select("duration").eq("id", exam_id).single().execute()
+        )
+        if exam_res.data:
+            exam_data = exam_res.data
+            exam_cache.set(exam_cache_key, exam_data, ttl=60.0)
+
+    if exam_data and exam_data.get("duration"):
+        try:
             started_str = attempt.get("started_at", "").replace("Z", "+00:00")
             started = datetime.fromisoformat(started_str)
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
             elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-            if elapsed > exam.data["duration"] * 60 + 30:  # 30s grace
+            if elapsed > exam_data["duration"] * 60 + 30:  # 30s grace
                 await submit_attempt(attempt_id=attempt_id, auto=True, user=user)
                 raise HTTPException(status_code=400, detail="Timer expired. Exam auto-submitted.")
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # skip timer check on parse error
-    
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # skip timer check on parse error
+
     # Upsert answer directly using the unique constraint (attempt_id, question_id)
     answer_payload = {
         "attempt_id": attempt_id,
         "question_id": data.question_id,
         "selected_option": data.selected_option,
     }
-    try:
-        sb.table("answers").upsert({
-            **answer_payload,
-            "selected_answer_text": data.selected_answer_text,
-        }).execute()
-    except Exception:
-        # Fallback if selected_answer_text doesn't exist
-        sb.table("answers").upsert(answer_payload).execute()
-    
+
+    def _do_upsert():
+        try:
+            sb.table("answers").upsert({
+                **answer_payload,
+                "selected_answer_text": data.selected_answer_text,
+            }).execute()
+        except Exception:
+            sb.table("answers").upsert(answer_payload).execute()
+
+    await run_in_threadpool(_do_upsert)
     return {"success": True}
 
 
 @app.post("/api/attempts/{attempt_id}/submit")
 async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_current_user)):
-    sb = get_supabase()
-    
-    # Verify attempt
-    attempt = sb.table("attempts").select("*").eq("id", attempt_id).single().execute()
-    if not attempt.data:
-        raise HTTPException(status_code=404, detail="Attempt not found")
+    lock = await get_attempt_lock(attempt_id)
+    async with lock:
+        attempt_cache.invalidate(f"attempt:{attempt_id}")
+        sb = get_supabase()
         
-    # Verify ownership
-    if user["role"] != "admin" and attempt.data.get("student_id") != user["id"]:
-        raise HTTPException(status_code=403, detail="Unauthorized attempt access")
-        
-    if attempt.data["status"] != "in_progress":
-        return {"attempt": attempt.data, "message": "Already submitted"}
+        # Verify attempt
+        attempt = await run_in_threadpool(
+            lambda: sb.table("attempts").select("*").eq("id", attempt_id).single().execute()
+        )
+        if not attempt.data:
+            raise HTTPException(status_code=404, detail="Attempt not found")
+            
+        # Verify ownership
+        if user["role"] != "admin" and attempt.data.get("student_id") != user["id"]:
+            raise HTTPException(status_code=403, detail="Unauthorized attempt access")
+            
+        if attempt.data["status"] != "in_progress":
+            return {"attempt": attempt.data, "message": "Already submitted"}
     
     # Calculate score with negative marking
     exam_res = sb.table("exams").select("*").eq("id", attempt.data["exam_id"]).single().execute()
@@ -1127,6 +1263,7 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
     wrong_count = 0
     skipped_count = 0
     total_marks = 0
+    answers_to_update = []
     
     for q in (questions.data or []):
         total_marks += q.get("marks") or 1
@@ -1172,9 +1309,30 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
             wrong_count += 1
             score -= neg_marking
             
-        # Update answer correctness
+        # Collect answer updates
         if q["id"] in answer_map:
-            sb.table("answers").update({"is_correct": is_correct}).eq("attempt_id", attempt_id).eq("question_id", q["id"]).execute()
+            answers_to_update.append({
+                "attempt_id": attempt_id,
+                "question_id": q["id"],
+                "selected_option": selected_opt,
+                "selected_answer_text": selected_txt,
+                "is_correct": is_correct
+            })
+            
+    if answers_to_update:
+        try:
+            sb.table("answers").upsert(answers_to_update).execute()
+        except Exception:
+            # Fallback if selected_answer_text doesn't exist
+            fallback_answers = []
+            for a in answers_to_update:
+                fallback_answers.append({
+                    "attempt_id": a["attempt_id"],
+                    "question_id": a["question_id"],
+                    "selected_option": a["selected_option"],
+                    "is_correct": a["is_correct"]
+                })
+            sb.table("answers").upsert(fallback_answers).execute()
             
     score = int(round(max(0.0, score)))
     percentage = round((score / total_marks) * 100, 2) if total_marks > 0 else 0.0
@@ -1349,14 +1507,47 @@ async def my_attempts(user=Depends(get_current_user)):
     return {"attempts": result.data or []}
 
 
+@app.get("/api/student/dashboard")
+async def get_student_dashboard(user=Depends(get_current_user)):
+    sb = get_supabase()
+    
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def fetch_exams():
+        result = sb.table("exams").select("id, title, description, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations").eq("is_published", True).order("created_at", desc=True).execute()
+        return result.data or []
+        
+    def fetch_attempts():
+        try:
+            result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration)").eq("student_id", user["id"]).order("created_at", desc=True).execute()
+        except Exception:
+            # Fallback if migration_v6 columns do not exist
+            result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration)").eq("student_id", user["id"]).order("created_at", desc=True).execute()
+            if result.data:
+                for r in result.data:
+                    r["percentage"] = 0.0
+                    r["correct_count"] = 0
+                    r["wrong_count"] = 0
+                    r["skipped_count"] = 0
+                    r["time_taken"] = 0
+        return result.data or []
+        
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_exams = executor.submit(fetch_exams)
+        f_attempts = executor.submit(fetch_attempts)
+        
+    return {
+        "exams": f_exams.result(),
+        "attempts": f_attempts.result()
+    }
+
+
 # ============================================================
 # EVENT LOGGING
 # ============================================================
 
 @app.post("/api/events/log")
-async def log_event(data: EventLog, user=Depends(get_current_user)):
-    sb = get_supabase()
-    
+async def log_event(data: EventLog, background_tasks: BackgroundTasks, user=Depends(get_current_user)):
     event_data = {
         "user_id": user["id"],
         "event_type": data.event_type,
@@ -1364,16 +1555,22 @@ async def log_event(data: EventLog, user=Depends(get_current_user)):
     }
     if data.attempt_id:
         event_data["attempt_id"] = data.attempt_id
-        # Increment violation count for tab/blur events (safe fetch first)
-        if data.event_type in ("tab_switch", "window_blur", "violation"):
+
+    def _process_log():
+        sb = get_supabase()
+        if data.attempt_id and data.event_type in ("tab_switch", "window_blur", "violation"):
             try:
                 cur_res = sb.table("attempts").select("violation_count").eq("id", data.attempt_id).single().execute()
                 cur_count = (cur_res.data.get("violation_count") or 0) if cur_res.data else 0
                 sb.table("attempts").update({"violation_count": cur_count + 1}).eq("id", data.attempt_id).execute()
             except Exception:
                 pass
-    
-    sb.table("event_logs").insert(event_data).execute()
+        try:
+            sb.table("event_logs").insert(event_data).execute()
+        except Exception:
+            pass
+
+    background_tasks.add_task(_process_log)
     return {"success": True}
 
 
@@ -1439,6 +1636,63 @@ async def monitor_stats(user=Depends(require_admin)):
         "active_attempts": counts[2],
         "completed_attempts": counts[3],
         "total_violations": counts[4],
+    }
+
+
+@app.get("/api/admin/dashboard")
+async def get_admin_dashboard(user=Depends(require_admin)):
+    sb = get_supabase()
+    
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def fetch_stats():
+        try:
+            if not IS_MOCK_MODE:
+                stats_res = sb.rpc("get_dashboard_stats").execute()
+                if stats_res.data:
+                    return stats_res.data
+        except Exception:
+            pass
+            
+        # Fallback counts query
+        def get_count(table_name, filter_func=None):
+            query = sb.table(table_name).select("id", count="exact")
+            if filter_func:
+                query = filter_func(query)
+            res = query.execute()
+            return res.count or 0
+            
+        filters = [
+            ("profiles", lambda q: q.eq("role", "student")),
+            ("exams", None),
+            ("attempts", lambda q: q.eq("status", "in_progress")),
+            ("attempts", lambda q: q.in_("status", ["submitted", "auto_submitted"])),
+            ("event_logs", lambda q: q.in_("event_type", ["tab_switch", "window_blur", "violation"]))
+        ]
+        
+        with ThreadPoolExecutor(max_workers=5) as sub_executor:
+            futures = [sub_executor.submit(get_count, table, filt) for table, filt in filters]
+            counts = [f.result() for f in futures]
+            
+        return {
+            "total_students": counts[0],
+            "total_exams": counts[1],
+            "active_attempts": counts[2],
+            "completed_attempts": counts[3],
+            "total_violations": counts[4],
+        }
+        
+    def fetch_exams():
+        result = sb.table("exams").select("id, title, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations, profiles(name)").order("created_at", desc=True).execute()
+        return result.data or []
+        
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_stats = executor.submit(fetch_stats)
+        f_exams = executor.submit(fetch_exams)
+        
+    return {
+        "stats": f_stats.result(),
+        "exams": f_exams.result()
     }
 
 
@@ -1731,26 +1985,39 @@ async def get_activity_feed(user=Depends(require_admin)):
 async def get_kick_history(user=Depends(require_admin)):
     sb = get_supabase()
     result = sb.table("kick_logs").select("*").order("created_at", desc=True).execute()
+    kick_logs = result.data or []
+    if not kick_logs:
+        return {"kick_logs": []}
+        
+    student_ids = list({k["student_id"] for k in kick_logs if k.get("student_id")})
+    exam_ids = list({k["exam_id"] for k in kick_logs if k.get("exam_id")})
+    attempt_ids = list({k["attempt_id"] for k in kick_logs if k.get("attempt_id")})
     
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_prof = executor.submit(lambda: sb.table("profiles").select("id, name, email").in_("id", student_ids).execute().data or [])
+        f_exam = executor.submit(lambda: sb.table("exams").select("id, title").in_("id", exam_ids).execute().data or [])
+        f_viol = executor.submit(lambda: sb.table("violations").select("id, attempt_id, violation_type, created_at").in_("attempt_id", attempt_ids).order("created_at", desc=False).execute().data or [])
+        
+    profiles_map = {p["id"]: p for p in f_prof.result()}
+    exams_map = {e["id"]: e for e in f_exam.result()}
+    
+    from collections import defaultdict
+    violations_map = defaultdict(list)
+    for v in f_viol.result():
+        violations_map[v["attempt_id"]].append(v)
+        
     logs = []
-    for row in (result.data or []):
-        student_id = row.get("student_id")
-        exam_id = row.get("exam_id")
-        attempt_id = row.get("attempt_id")
-        profile = sb.table("profiles").select("*").eq("id", student_id).single().execute()
-        exam = sb.table("exams").select("*").eq("id", exam_id).single().execute()
-        
-        # Fetch detailed violation history for this attempt
-        violations_res = sb.table("violations").select("*").eq("attempt_id", attempt_id).order("created_at", desc=False).execute()
-        violations_list = violations_res.data or []
-        
+    for row in kick_logs:
+        prof = profiles_map.get(row.get("student_id"), {"name": "Student", "email": ""})
+        exam = exams_map.get(row.get("exam_id"), {"title": "Exam"})
         logs.append({
             **row,
-            "student_name": profile.data.get("name") if profile.data else "Student",
-            "email": profile.data.get("email") if profile.data else "",
-            "exam_title": exam.data.get("title") if exam.data else "Exam",
-            "department": "CSE" if "cse" in (profile.data.get("email") or "") else "ECE",
-            "violations": violations_list
+            "student_name": prof.get("name"),
+            "email": prof.get("email"),
+            "exam_title": exam.get("title"),
+            "department": "CSE" if "cse" in prof.get("email", "").lower() else "ECE",
+            "violations": violations_map.get(row.get("attempt_id"), [])
         })
     return {"kick_logs": logs}
 

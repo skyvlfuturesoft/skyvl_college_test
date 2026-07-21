@@ -3,10 +3,7 @@ import { api } from '../../lib/api';
 import { Pause, Play, XCircle, Send, Wifi, WifiOff, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import '../../proctor.css';
 
-export default function LiveStudentTable() {
-  const [students, setStudents] = useState([]);
-  const [loading, setLoading] = useState(true);
-
+export default function LiveStudentTable({ students = [], loading = false, onAction = () => {} }) {
   // Search, Filter, Sort, Paginate State
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -15,23 +12,6 @@ export default function LiveStudentTable() {
   const [sortAsc, setSortAsc] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-
-  const loadStudents = async () => {
-    try {
-      const data = await api('/api/live-students');
-      setStudents(data.live_students || []);
-    } catch (e) {
-      // Silently retry on network errors
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadStudents();
-    const interval = setInterval(loadStudents, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Reset page when filters change
   useEffect(() => {
@@ -44,7 +24,7 @@ export default function LiveStudentTable() {
         method: 'POST',
         body: { attempt_id: attemptId, action_type: action, details: {} }
       });
-      loadStudents();
+      onAction();
     } catch (e) {
       console.error(`Action ${action} failed:`, e);
     }

@@ -221,6 +221,15 @@ export default function CreateExam() {
     });
   };
 
+  const fileToBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (evt) => resolve(evt.target.result);
+      reader.onerror = (evt) => reject(evt);
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleImageUpload = async (e, qIdx) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -233,7 +242,7 @@ export default function CreateExam() {
     setUploadingIdx(qIdx);
     try {
       const compressedFile = await compressImage(file);
-      const fileExt = file.name.split('.').pop();
+      const fileExt = file.name.split('.').pop() || 'jpg';
       const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}.${fileExt}`;
       const filePath = `questions/${fileName}`;
 
@@ -241,15 +250,24 @@ export default function CreateExam() {
         .from('exam-images')
         .upload(filePath, compressedFile);
 
-      if (error) throw error;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('exam-images')
-        .getPublicUrl(filePath);
-
-      handleQuestionChange(qIdx, 'image_url', publicUrl);
+      if (!error && data) {
+        const { data: { publicUrl } } = supabase.storage
+          .from('exam-images')
+          .getPublicUrl(filePath);
+        handleQuestionChange(qIdx, 'image_url', publicUrl);
+      } else {
+        console.warn('Supabase storage upload error, using base64 fallback:', error?.message);
+        const base64Url = await fileToBase64(compressedFile);
+        handleQuestionChange(qIdx, 'image_url', base64Url);
+      }
     } catch (err) {
-      alert(err.message || 'Image upload failed');
+      console.warn('Unexpected error during image upload, using base64 fallback:', err);
+      try {
+        const base64Url = await fileToBase64(file);
+        handleQuestionChange(qIdx, 'image_url', base64Url);
+      } catch (fallbackErr) {
+        alert(err.message || 'Image upload failed');
+      }
     } finally {
       setUploadingIdx(null);
     }

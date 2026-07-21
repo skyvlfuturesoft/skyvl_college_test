@@ -14,27 +14,24 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('published');
   const [isDuplicating, setIsDuplicating] = useState(false);
 
-  const { data: statsData, isLoading: isStatsLoading, error: statsError } = useQuery({
-    queryKey: ['adminStats'],
-    queryFn: () => api('/api/monitor/stats'),
-    refetchInterval: 10000,
+  const { data: dashboardData, isLoading, error: dashboardError, refetch: refetchDashboard } = useQuery({
+    queryKey: ['adminDashboard'],
+    queryFn: () => api('/api/admin/dashboard'),
+    staleTime: 300000, // 5 minutes stale time
+    refetchInterval: 30000, // Poll every 30s
   });
 
-  const { data: examsData, isLoading: isExamsLoading, error: examsError, refetch: refetchExams } = useQuery({
-    queryKey: ['adminExams'],
-    queryFn: () => api('/api/exams'),
-    staleTime: 10000,
-  });
-
-  const stats = statsData || {
+  const stats = dashboardData?.stats || {
     total_students: 0,
     total_exams: 0,
     active_attempts: 0,
     completed_attempts: 0,
     total_violations: 0,
   };
-  const exams = examsData?.exams || [];
-  const error = examsError?.message || statsError?.message || '';
+  const exams = dashboardData?.exams || [];
+  const error = dashboardError?.message || '';
+  const isStatsLoading = isLoading;
+  const isExamsLoading = isLoading;
 
   const handlePublishToggle = async (examId, currentStatus) => {
     try {
@@ -42,7 +39,7 @@ export default function AdminDashboard() {
         method: 'PUT',
         body: { is_published: !currentStatus }
       });
-      refetchExams();
+      refetchDashboard();
     } catch (err) {
       alert(err.message || 'Failed to update exam status');
     }
@@ -52,7 +49,7 @@ export default function AdminDashboard() {
     if (confirm('Are you sure you want to delete this draft exam? This action is permanent and cannot be undone.')) {
       try {
         await api(`/api/exams/${examId}`, { method: 'DELETE' });
-        refetchExams();
+        refetchDashboard();
         alert('Draft exam deleted successfully!');
       } catch (err) {
         alert(err.message || 'Failed to delete exam');
@@ -83,23 +80,28 @@ export default function AdminDashboard() {
         });
         const newExamId = duplicatedExam.exam.id;
 
-        for (const q of targetQuestions) {
-          await api('/api/questions', {
+        if (targetQuestions.length > 0) {
+          const formattedQuestions = targetQuestions.map(q => ({
+            exam_id: newExamId,
+            question_text: q.question_text,
+            question_type: q.question_type || 'mcq',
+            image_url: q.image_url || '',
+            options: q.options || [],
+            correct_answer: q.correct_answer !== undefined ? q.correct_answer : 0,
+            accepted_answers: q.accepted_answers || [],
+            marks: q.marks
+          }));
+
+          await api('/api/questions/bulk', {
             method: 'POST',
             body: {
               exam_id: newExamId,
-              question_text: q.question_text,
-              question_type: q.question_type || 'mcq',
-              image_url: q.image_url || '',
-              options: q.options || [],
-              correct_answer: q.correct_answer !== undefined ? q.correct_answer : 0,
-              accepted_answers: q.accepted_answers || [],
-              marks: q.marks
+              questions: formattedQuestions
             }
           });
         }
 
-        await refetchExams();
+        await refetchDashboard();
         alert('Exam duplicated successfully!');
       } catch (err) {
         alert(err.message || 'Failed to duplicate exam');
