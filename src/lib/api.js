@@ -29,7 +29,7 @@ function getToken() {
 }
 
 export async function api(endpoint, options = {}) {
-  const { method = 'GET', body, params, retries = 3 } = options;
+  const { method = 'GET', body, params, retries = 5 } = options;
 
   let url = `${API_URL}${endpoint}`;
   if (params) {
@@ -53,9 +53,9 @@ export async function api(endpoint, options = {}) {
     try {
       const response = await fetch(url, config);
 
-      // Handle server error retries (502, 503, 504)
+      // Handle server error retries (502, 503, 504, 520, 524)
       if (response.status >= 502 && response.status <= 504 && attemptCount < retries) {
-        const delay = Math.pow(2, attemptCount - 1) * 300;
+        const delay = Math.min(attemptCount * 1000, 4000);
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
@@ -83,18 +83,21 @@ export async function api(endpoint, options = {}) {
       return data;
     } catch (err) {
       lastError = err;
-      // Don't retry auth errors or client-side HTTP error details
+      // Don't retry client-side HTTP errors (400, 401, 403, 404)
       if (err.message && (err.message.includes('Session expired') || err.message.includes('401') || err.message.includes('403') || err.message.includes('404') || err.message.includes('400'))) {
         throw err;
       }
       if (attemptCount < retries) {
-        const delay = Math.pow(2, attemptCount - 1) * 300;
+        const delay = Math.min(attemptCount * 1000, 4000);
         await new Promise((r) => setTimeout(r, delay));
       }
     }
   }
 
-  throw lastError || new Error('Cannot connect to the server. Please make sure the backend is running.');
+  const cleanMessage = (lastError && lastError.message !== 'Failed to fetch') 
+    ? lastError.message 
+    : 'Unable to connect to server. Please check your internet connection or try again in a moment.';
+  throw new Error(cleanMessage);
 }
 
 export default api;
