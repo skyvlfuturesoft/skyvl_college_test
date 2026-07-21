@@ -249,6 +249,40 @@ export default function ExamPage() {
     );
   }
 
+  if (submitting) {
+    return (
+      <div className="page-loader" style={{ flexDirection: 'column', gap: 24, textAlign: 'center', padding: 32 }}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="loader-spinner" style={{ width: 64, height: 64, borderWidth: 5 }} />
+          <Send size={24} style={{ position: 'absolute', color: 'var(--primary)' }} />
+        </div>
+        <div>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: 8, color: 'var(--primary-dark)' }}>
+            Submitting Your Examination...
+          </h2>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', maxWidth: 420, margin: '0 auto 24px', lineHeight: 1.5 }}>
+            Please wait while we evaluate your responses and generate your result report.
+          </p>
+        </div>
+        <div style={{
+          background: 'var(--card-bg)', border: '1px solid var(--border-light)',
+          borderRadius: 12, padding: '20px 28px', display: 'flex', flexDirection: 'column',
+          gap: 12, textAlign: 'left', minWidth: 320, boxShadow: 'var(--shadow-sm)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.9rem', color: '#10B981' }}>
+            <span style={{ fontWeight: 'bold' }}>✓</span> Answers synced & verified
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.9rem', color: 'var(--primary)' }}>
+            <div className="loader-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Calculating final score & percentages
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+            <span style={{ opacity: 0.5 }}>⏳</span> Preparing assessment report
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const currentQuestion = questions[currentIdx];
 
   return (
