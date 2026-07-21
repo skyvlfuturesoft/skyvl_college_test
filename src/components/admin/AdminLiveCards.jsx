@@ -24,15 +24,16 @@ export default function AdminLiveCards({ students = [], stats = {}, kickedCount 
     const avgProgress = students.length > 0 ? Math.round(totalProgress / students.length) : 0;
 
     setLiveStats({
-      online: students.length,
+      online: stats.total_students !== undefined ? stats.total_students : students.length,
       active: stats.active_attempts || 0,
       completed: stats.completed_attempts || 0,
-      kicked: kickedCount,
+      kicked: stats.kicked_students !== undefined ? stats.kicked_students : kickedCount,
       violations: stats.total_violations || 0,
       offline: offlineCount,
-      exams: uniqueExams,
+      exams: stats.total_exams || uniqueExams,
       avgProgress: avgProgress,
-      avgScore: 78, // mock constant or aggregated
+      avgScore: stats.avg_score !== undefined ? stats.avg_score : 0,
+      activeRules: stats.active_rules || 6,
       networkLogs: offlineCount
     });
   }, [students, stats, kickedCount]);
@@ -100,7 +101,7 @@ export default function AdminLiveCards({ students = [], stats = {}, kickedCount 
 
       <div className="stat-card">
         <div className="stat-icon" style={{ color: '#64748B' }}><HelpCircle size={20} /></div>
-        <div className="stat-number">10</div>
+        <div className="stat-number">{liveStats.activeRules}</div>
         <div className="stat-label">Active Proctor Rules</div>
       </div>
     </div>
