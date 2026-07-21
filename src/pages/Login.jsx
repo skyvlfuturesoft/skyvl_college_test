@@ -1,20 +1,24 @@
-import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Shield } from 'lucide-react';
 import api from '../lib/api';
 import '../app.css';
 
 export default function Login() {
-  const [email, setEmail] = useState('');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { login, logout } = useAuth();
+
+  const [email, setEmail] = useState(location.state?.email || '');
   const [password, setPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [showReset, setShowReset] = useState(false);
-  const [successMsg, setSuccessMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState(
+    location.state?.registered ? 'Registration successful! Please sign in with your account credentials.' : ''
+  );
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const { login, logout } = useAuth();
-  const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault();

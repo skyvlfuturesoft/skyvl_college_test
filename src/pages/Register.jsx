@@ -20,11 +20,7 @@ export default function Register() {
     setSubmitting(true);
     try {
       await register(name, email, password, role);
-      if (role === 'admin') {
-        navigate('/admin');
-      } else {
-        navigate('/student');
-      }
+      navigate('/login', { state: { registered: true, email } });
     } catch (err) {
       setError(err.message || 'Registration failed');
     } finally {
