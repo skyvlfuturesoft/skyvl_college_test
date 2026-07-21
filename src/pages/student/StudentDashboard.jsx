@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
-import { api } from '../../lib/api';
+import api from '../../lib/api';
 import { Calendar, Clock, Award, Play } from 'lucide-react';
 import '../../app.css';
 

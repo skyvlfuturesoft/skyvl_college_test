@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { ShieldAlert, AlertOctagon } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import api from '../../lib/api';
 import '../../proctor.css';
 
 export default function ExamTerminated() {

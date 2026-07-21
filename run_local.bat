@@ -8,9 +8,9 @@ echo   Starting Local Development Environment
 echo ============================================================
 echo.
 
-:: Kill any process already using port 8010
-echo [1/4] Clearing port 8010...
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8010" ^| findstr "LISTENING"') do (
+:: Kill any process already using port 8011
+echo [1/4] Clearing port 8011...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8011" ^| findstr "LISTENING"') do (
     taskkill /PID %%a /F >nul 2>&1
 )
 :: Also kill any lingering Python/node processes from previous runs
@@ -25,8 +25,8 @@ for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":5173" ^| findstr "LI
 )
 timeout /t 1 /nobreak >nul
 
-echo [3/4] Starting FastAPI backend on http://127.0.0.1:8010 ...
-start "SOEMS Backend (port 8010)" cmd /k "cd /d %~dp0backend && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8010"
+echo [3/4] Starting FastAPI backend on http://127.0.0.1:8011 ...
+start "SOEMS Backend (port 8011)" cmd /k "cd /d %~dp0backend && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8011"
 
 :: Wait for backend to initialise before starting frontend
 timeout /t 4 /nobreak >nul
@@ -39,8 +39,8 @@ echo ============================================================
 echo   Both servers are starting in separate windows.
 echo.
 echo   Frontend : http://localhost:5173
-echo   Backend  : http://127.0.0.1:8010
-echo   API Docs : http://127.0.0.1:8010/docs
+echo   Backend  : http://127.0.0.1:8011
+echo   API Docs : http://127.0.0.1:8011/docs
 echo ============================================================
 echo.
 echo   Close this window any time. Servers run in their own windows.

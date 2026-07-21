@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 
-export default function useExamProctor(attemptId, currentIdx, answers, timeLeft, submitExam, initialViolations) {
+export default function useExamProctor(attemptId, currentIdx, answers, timeLeft, submitExam, initialViolations, isSubmitting = false) {
   const navigate = useNavigate();
   const { logout } = useAuth();
   const [violationCount, setViolationCount] = useState(0);
@@ -23,6 +23,7 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
   const timeLeftRef = useRef(timeLeft);
   const violationCountRef = useRef(violationCount);
   const isPausedRef = useRef(isPaused);
+  const isSubmittingRef = useRef(isSubmitting);
 
   // Sync refs to avoid stale closures in event listeners
   useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
@@ -30,6 +31,7 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
   useEffect(() => { timeLeftRef.current = timeLeft; }, [timeLeft]);
   useEffect(() => { violationCountRef.current = violationCount; }, [violationCount]);
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+  useEffect(() => { isSubmittingRef.current = isSubmitting; }, [isSubmitting]);
 
   // Utility to gather browser metadata
   const getProctorMetadata = () => {
@@ -121,7 +123,7 @@ export default function useExamProctor(attemptId, currentIdx, answers, timeLeft,
     const meta = getProctorMetadata();
 
     const reportViolation = async (type) => {
-      if (isPausedRef.current) return;
+      if (isPausedRef.current || isSubmittingRef.current) return;
 
       const nowTime = Date.now();
       if (nowTime - lastViolationTimeRef.current < 1500) {

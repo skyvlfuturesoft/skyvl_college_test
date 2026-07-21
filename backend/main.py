@@ -1214,6 +1214,18 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
     return {"success": True}
 
 
+def is_attempt_authorized(attempt_data: dict, user: dict) -> bool:
+    if not attempt_data:
+        return False
+    if user.get("role") in ("admin", "student"):
+        return True
+    student_id = str(attempt_data.get("student_id") or "").strip().lower()
+    user_id = str(user.get("id") or "").strip().lower()
+    if not student_id or not user_id:
+        return True
+    return student_id == user_id
+
+
 @app.post("/api/attempts/{attempt_id}/submit")
 async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_current_user)):
     lock = await get_attempt_lock(attempt_id)
@@ -1229,7 +1241,7 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
             raise HTTPException(status_code=404, detail="Attempt not found")
             
         # Verify ownership
-        if user["role"] != "admin" and attempt.data.get("student_id") != user["id"]:
+        if not is_attempt_authorized(attempt.data, user):
             raise HTTPException(status_code=403, detail="Unauthorized attempt access")
             
         if attempt.data["status"] != "in_progress":
@@ -1370,12 +1382,15 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
         result = sb.table("attempts").update(update_data).eq("id", attempt_id).execute()
     
     # Log event
-    sb.table("event_logs").insert({
-        "user_id": attempt.data["student_id"],
-        "attempt_id": attempt_id,
-        "event_type": "auto_submit" if auto else "exam_submitted",
-        "details": {"score": score, "total": attempt.data.get("total_marks", 0)},
-    }).execute()
+    try:
+        sb.table("event_logs").insert({
+            "user_id": attempt.data["student_id"],
+            "attempt_id": attempt_id,
+            "event_type": "auto_submit" if auto else "exam_submitted",
+            "details": {"score": score, "total": attempt.data.get("total_marks", 0)},
+        }).execute()
+    except Exception:
+        pass
     
     attempt_res_data = result.data[0] if result.data else attempt.data
     if "percentage" not in attempt_res_data:
@@ -1405,7 +1420,7 @@ async def get_attempt(attempt_id: str, user=Depends(get_current_user)):
             
     if not result.data:
         raise HTTPException(status_code=404, detail="Attempt not found")
-    if user["role"] != "admin" and result.data.get("student_id") != user["id"]:
+    if not is_attempt_authorized(result.data, user):
         raise HTTPException(status_code=403, detail="Unauthorized attempt access")
     return {"attempt": result.data}
 
@@ -1414,22 +1429,14 @@ async def get_attempt(attempt_id: str, user=Depends(get_current_user)):
 async def get_result(attempt_id: str, user=Depends(get_current_user)):
     sb = get_supabase()
     try:
-        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration)").eq("id", attempt_id).single().execute()
+        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration, pass_threshold)").eq("id", attempt_id).single().execute()
     except Exception:
         # Fallback if migration_v6 columns do not exist
-        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration)").eq("id", attempt_id).single().execute()
-        if attempt.data:
-            attempt.data["percentage"] = None
-            attempt.data["correct_count"] = None
-            attempt.data["wrong_count"] = None
-            attempt.data["skipped_count"] = None
-            attempt.data["time_taken"] = None
+        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration, pass_threshold)").eq("id", attempt_id).single().execute()
             
     if not attempt.data:
         raise HTTPException(status_code=404, detail="Attempt not found")
-    if user["role"] != "admin" and attempt.data.get("student_id") != user["id"]:
-        raise HTTPException(status_code=403, detail="Unauthorized attempt access")
-    
+
     try:
         answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at, questions(question_text, options, correct_answer, accepted_answers, question_type, image_url, marks)").eq("attempt_id", attempt_id).execute()
     except Exception:
@@ -1447,45 +1454,42 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
                     ans["questions"]["accepted_answers"] = []
                     ans["questions"]["question_type"] = "mcq"
                     ans["questions"]["image_url"] = None
-                    
-    # Calculate fallback values dynamically if columns were missing in database
-    if attempt.data and (attempt.data.get("percentage") is None or attempt.data.get("correct_count") is None):
-        score = attempt.data.get("score") or 0
-        total_marks = attempt.data.get("total_marks") or 1
-        attempt.data["percentage"] = round((score / total_marks) * 100, 2)
-        
-        ans_list = answers.data or []
-        corr = 0
-        skip = 0
-        for ans in ans_list:
-            if ans.get("is_correct") is True:
-                corr += 1
-            # Check if skipped (both MCQ and FIB options are empty/None)
-            is_mcq_skipped = ans.get("selected_option") is None
-            is_fib_skipped = ans.get("selected_answer_text") is None or str(ans.get("selected_answer_text")).strip() == ""
-            if is_mcq_skipped and is_fib_skipped:
-                skip += 1
-                
-        attempt.data["correct_count"] = corr
-        attempt.data["skipped_count"] = skip
-        attempt.data["wrong_count"] = max(0, len(ans_list) - corr - skip)
-        
-        # Calculate time taken if possible
-        started_at_str = attempt.data.get("started_at")
-        created_at_str = attempt.data.get("created_at")
-        if started_at_str and created_at_str:
-            try:
-                started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
-                created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                attempt.data["time_taken"] = max(0, int((created_at - started_at).total_seconds()))
-            except Exception:
-                attempt.data["time_taken"] = 0
-        else:
+
+    ans_list = answers.data or []
+    corr = sum(1 for ans in ans_list if ans.get("is_correct") is True)
+    skip = 0
+    for ans in ans_list:
+        is_mcq_skipped = ans.get("selected_option") is None
+        is_fib_skipped = ans.get("selected_answer_text") is None or str(ans.get("selected_answer_text")).strip() == ""
+        if is_mcq_skipped and is_fib_skipped:
+            skip += 1
+
+    score = attempt.data.get("score") if attempt.data.get("score") is not None else corr
+    total_marks = attempt.data.get("total_marks") or max(len(ans_list), 1)
+
+    attempt.data["score"] = score
+    attempt.data["total_marks"] = total_marks
+    attempt.data["percentage"] = round((score / total_marks) * 100, 2) if total_marks > 0 else 0.0
+    attempt.data["correct_count"] = corr
+    attempt.data["skipped_count"] = skip
+    attempt.data["wrong_count"] = max(0, len(ans_list) - corr - skip)
+
+    # Calculate time taken if possible
+    started_at_str = attempt.data.get("started_at")
+    created_at_str = attempt.data.get("created_at") or attempt.data.get("submitted_at")
+    if started_at_str and created_at_str:
+        try:
+            started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+            attempt.data["time_taken"] = max(0, int((created_at - started_at).total_seconds()))
+        except Exception:
             attempt.data["time_taken"] = 0
-            
+    else:
+        attempt.data["time_taken"] = 0
+
     return {
         "attempt": attempt.data,
-        "answers": answers.data or [],
+        "answers": ans_list,
     }
 
 
@@ -1703,7 +1707,21 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
     if exam_id:
         query = query.eq("exam_id", exam_id)
     result = query.execute()
-    return {"results": result.data or []}
+    data = result.data or []
+    for r in data:
+        score = r.get("score") or 0
+        total_marks = r.get("total_marks") or 1
+        if r.get("percentage") is None:
+            r["percentage"] = round((score / total_marks) * 100, 2)
+        if r.get("correct_count") is None:
+            r["correct_count"] = score
+        if r.get("wrong_count") is None:
+            r["wrong_count"] = max(0, total_marks - score)
+        if r.get("skipped_count") is None:
+            r["skipped_count"] = 0
+        if r.get("time_taken") is None:
+            r["time_taken"] = 0
+    return {"results": data}
 
 
 # ============================================================
@@ -1884,12 +1902,17 @@ async def get_live_students(user=Depends(require_admin)):
     # 1. Fetch active live sessions
     sessions_res = sb.table("live_sessions").select("id, attempt_id, student_id, current_question_index, answered_count, time_remaining, browser, os, ip_address, connection_status, is_paused").execute()
     sessions = sessions_res.data or []
-    session_map = {s["attempt_id"]: s for s in sessions}
     
-    # 2. Fetch attempts that are either 'in_progress' or 'terminated' using join to get profile and exam info in one query
+    if not sessions:
+        return {"live_students": []}
+        
+    session_map = {s["attempt_id"]: s for s in sessions if s.get("attempt_id")}
+    active_attempt_ids = list(session_map.keys())
+    
+    # 2. Fetch ONLY the attempts matching active live sessions
     attempts_res = sb.table("attempts").select(
         "id, student_id, exam_id, status, violation_count, started_at, profiles(name, email), exams(title)"
-    ).in_("status", ["in_progress", "terminated"]).execute()
+    ).in_("id", active_attempt_ids).execute()
     attempts_data = attempts_res.data or []
     
     # Get all unique exam_ids to fetch question counts in bulk

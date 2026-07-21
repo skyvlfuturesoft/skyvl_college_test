@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Shield } from 'lucide-react';
-import { api } from '../lib/api';
+import api from '../lib/api';
 import '../app.css';
 
 export default function Login() {

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api } from '../../lib/api';
+import api from '../../lib/api';
 import { Award, AlertTriangle, ArrowLeft, Check, X, Printer, Timer, CheckCircle2, XCircle, AlertCircle } from 'lucide-react';
 import '../../app.css';
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api } from '../../lib/api';
+import api from '../../lib/api';
 import { Clock, AlertTriangle, ChevronRight, ChevronLeft, Send, PauseCircle } from 'lucide-react';
 import useExamProctor from '../../hooks/useExamProctor';
 import ViolationModal from '../../components/ViolationModal';
@@ -100,7 +100,7 @@ export default function ExamPage() {
     warningMessage,
     isFinalWarning,
     isPaused
-  } = useExamProctor(attemptId, currentIdx, answers, timeLeft, () => submitExam(true), violations);
+  } = useExamProctor(attemptId, currentIdx, answers, timeLeft, () => submitExam(true), violations, submitting);
 
   // Timer loop with drift prevention
   useEffect(() => {
@@ -220,18 +220,19 @@ export default function ExamPage() {
     clearInterval(timerRef.current);
 
     // Flush remaining dirty answers
-    await saveDirtyAnswers();
+    try {
+      await saveDirtyAnswers();
+    } catch (e) {}
 
     try {
       await api(`/api/attempts/${attemptId}/submit?auto=${isAuto}`, { method: 'POST' });
+    } catch (err) {
+      console.warn('Submit request info:', err);
+    } finally {
       try {
         localStorage.removeItem(`exam_answers_${attemptId}`);
       } catch (e) {}
       navigate(`/student/result/${attemptId}`, { replace: true });
-    } catch (err) {
-      setError(err.message || 'Submission failed');
-      setSubmitting(false);
-      submittingRef.current = false;
     }
   };
 
