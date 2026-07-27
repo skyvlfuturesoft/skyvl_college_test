@@ -8,9 +8,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        // Try ports in order: 8000, 8001, 8002
-        // The backend startup script always uses 8000 via run_local.bat
-        target: 'http://127.0.0.1:8011',
+        // Backend runs on http://127.0.0.1:8000
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
         secure: false,
         configure: (proxy) => {

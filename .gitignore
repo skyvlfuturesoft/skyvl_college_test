@@ -32,3 +32,4 @@ backend/__pycache__/
 .git/
 venv/
 
+.vercel

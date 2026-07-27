@@ -1762,12 +1762,26 @@ async def get_admin_dashboard(user=Depends(require_admin)):
 
 @app.get("/api/results")
 async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
-    sb = get_supabase()
-    query = sb.table("attempts").select("*, profiles(name, email, department, section), exams(title)").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
-    if exam_id:
-        query = query.eq("exam_id", exam_id)
-    result = query.execute()
-    data = result.data or []
+    try:
+        sb = get_supabase()
+        query = sb.table("attempts").select("*, profiles(name, email), exams(title)").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
+        if exam_id:
+            query = query.eq("exam_id", exam_id)
+        result = query.execute()
+        data = result.data or []
+    except Exception as err:
+        print("Error fetching results from Supabase:", err)
+        try:
+            sb = get_supabase()
+            query = sb.table("attempts").select("*").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
+            if exam_id:
+                query = query.eq("exam_id", exam_id)
+            result = query.execute()
+            data = result.data or []
+        except Exception as inner_err:
+            print("Fallback query error:", inner_err)
+            data = []
+
     for r in data:
         score = r.get("score") or 0
         total_marks = r.get("total_marks") or 1
@@ -1781,6 +1795,17 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
             r["skipped_count"] = 0
         if r.get("time_taken") is None:
             r["time_taken"] = 0
+
+        # Safe defaults for profile metadata
+        if not r.get("profiles"):
+            r["profiles"] = {"name": r.get("student_name", "Student"), "email": r.get("student_email", ""), "department": "General", "section": "A"}
+        else:
+            p = r["profiles"]
+            if "department" not in p:
+                p["department"] = "General"
+            if "section" not in p:
+                p["section"] = "A"
+
     return {"results": data}
 
 
