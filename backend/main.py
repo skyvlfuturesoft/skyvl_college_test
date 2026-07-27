@@ -1392,6 +1392,12 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
     except Exception:
         pass
     
+    # Clear live_session entry upon submission
+    try:
+        sb.table("live_sessions").delete().eq("attempt_id", attempt_id).execute()
+    except Exception:
+        pass
+
     attempt_res_data = result.data[0] if result.data else attempt.data
     if "percentage" not in attempt_res_data:
         attempt_res_data["percentage"] = percentage
@@ -1437,42 +1443,96 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
     if not attempt.data:
         raise HTTPException(status_code=404, detail="Attempt not found")
 
+    exam_id = attempt.data.get("exam_id")
+
+    # Fetch ALL questions belonging to this exam to include skipped questions in breakdown
+    all_questions = []
     try:
-        answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at, questions(question_text, options, correct_answer, accepted_answers, question_type, image_url, marks)").eq("attempt_id", attempt_id).execute()
+        q_res = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, accepted_answers, question_type, image_url, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
+        all_questions = q_res.data or []
     except Exception:
-        # Fallback query if migration_v6 columns do not exist in questions or answers table
         try:
-            answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at, questions(question_text, options, correct_answer, marks)").eq("attempt_id", attempt_id).execute()
+            q_res = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
+            all_questions = q_res.data or []
+            for q in all_questions:
+                q["accepted_answers"] = []
+                q["question_type"] = "mcq"
+                q["image_url"] = None
         except Exception:
-            answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, is_correct, created_at, questions(question_text, options, correct_answer, marks)").eq("attempt_id", attempt_id).execute()
-            if answers.data:
-                for ans in answers.data:
-                    ans["selected_answer_text"] = None
-        if answers.data:
-            for ans in answers.data:
-                if "questions" in ans and ans["questions"]:
-                    ans["questions"]["accepted_answers"] = []
-                    ans["questions"]["question_type"] = "mcq"
-                    ans["questions"]["image_url"] = None
+            all_questions = []
 
-    ans_list = answers.data or []
-    corr = sum(1 for ans in ans_list if ans.get("is_correct") is True)
+    # Fetch saved student answers
+    try:
+        answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at").eq("attempt_id", attempt_id).execute()
+        ans_list = answers.data or []
+    except Exception:
+        try:
+            answers = sb.table("answers").select("id, attempt_id, question_id, selected_option, is_correct, created_at").eq("attempt_id", attempt_id).execute()
+            ans_list = answers.data or []
+            for a in ans_list:
+                a["selected_answer_text"] = None
+        except Exception:
+            ans_list = []
+
+    ans_map = {a["question_id"]: a for a in ans_list if a.get("question_id")}
+
+    full_answers = []
+    corr = 0
     skip = 0
-    for ans in ans_list:
-        is_mcq_skipped = ans.get("selected_option") is None
-        is_fib_skipped = ans.get("selected_answer_text") is None or str(ans.get("selected_answer_text")).strip() == ""
-        if is_mcq_skipped and is_fib_skipped:
-            skip += 1
+    wrong = 0
+    calculated_score = 0.0
+    total_marks = 0
 
-    score = attempt.data.get("score") if attempt.data.get("score") is not None else corr
-    total_marks = attempt.data.get("total_marks") or max(len(ans_list), 1)
+    for q in all_questions:
+        q_id = q["id"]
+        q_marks = q.get("marks") or 1
+        total_marks += q_marks
+        q_type = q.get("question_type") or "mcq"
+
+        if q_id in ans_map:
+            ans = ans_map[q_id]
+            ans_copy = {**ans, "questions": q}
+        else:
+            ans_copy = {
+                "id": f"skipped-{q_id}",
+                "attempt_id": attempt_id,
+                "question_id": q_id,
+                "selected_option": None,
+                "selected_answer_text": None,
+                "is_correct": False,
+                "questions": q
+            }
+
+        # Check if skipped
+        is_skipped = False
+        if q_type in ("mcq", "image_mcq"):
+            if ans_copy.get("selected_option") is None:
+                is_skipped = True
+        else:
+            sel_txt = ans_copy.get("selected_answer_text")
+            if sel_txt is None or str(sel_txt).strip() == "":
+                is_skipped = True
+
+        if is_skipped:
+            skip += 1
+        elif ans_copy.get("is_correct") is True:
+            corr += 1
+            calculated_score += q_marks
+        else:
+            wrong += 1
+
+        full_answers.append(ans_copy)
+
+    score = attempt.data.get("score") if attempt.data.get("score") is not None else calculated_score
+    if total_marks <= 0:
+        total_marks = max(len(all_questions), 1)
 
     attempt.data["score"] = score
     attempt.data["total_marks"] = total_marks
     attempt.data["percentage"] = round((score / total_marks) * 100, 2) if total_marks > 0 else 0.0
     attempt.data["correct_count"] = corr
     attempt.data["skipped_count"] = skip
-    attempt.data["wrong_count"] = max(0, len(ans_list) - corr - skip)
+    attempt.data["wrong_count"] = wrong
 
     # Calculate time taken if possible
     started_at_str = attempt.data.get("started_at")
@@ -1489,7 +1549,7 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
 
     return {
         "attempt": attempt.data,
-        "answers": ans_list,
+        "answers": full_answers,
     }
 
 
@@ -1899,8 +1959,8 @@ async def issue_warning(data: WarningCreate, user=Depends(require_admin)):
 async def get_live_students(user=Depends(require_admin)):
     sb = get_supabase()
     
-    # 1. Fetch active live sessions
-    sessions_res = sb.table("live_sessions").select("id, attempt_id, student_id, current_question_index, answered_count, time_remaining, browser, os, ip_address, connection_status, is_paused").execute()
+    # 1. Fetch active live sessions with last_heartbeat
+    sessions_res = sb.table("live_sessions").select("id, attempt_id, student_id, current_question_index, answered_count, time_remaining, browser, os, ip_address, connection_status, is_paused, last_heartbeat").execute()
     sessions = sessions_res.data or []
     
     if not sessions:
@@ -1915,6 +1975,22 @@ async def get_live_students(user=Depends(require_admin)):
     ).in_("id", active_attempt_ids).execute()
     attempts_data = attempts_res.data or []
     
+    # Clean up stale live_sessions for submitted attempts & filter out non-active attempts
+    now = datetime.now(timezone.utc)
+    valid_attempts = []
+    for att in attempts_data:
+        att_id = att.get("id")
+        att_status = att.get("status")
+        if att_status in ("submitted", "auto_submitted"):
+            try:
+                sb.table("live_sessions").delete().eq("attempt_id", att_id).execute()
+            except Exception:
+                pass
+        else:
+            valid_attempts.append(att)
+
+    attempts_data = valid_attempts
+
     # Get all unique exam_ids to fetch question counts in bulk
     exam_ids = {att["exam_id"] for att in attempts_data if att.get("exam_id")}
     
@@ -1973,6 +2049,17 @@ async def get_live_students(user=Depends(require_admin)):
         student_name = profile_data.get("name") or "Student"
         student_email = profile_data.get("email") or ""
         
+        # Determine real active connection status based on last_heartbeat age
+        conn_status = s.get("connection_status", "connected") if s else "disconnected"
+        last_hb_str = s.get("last_heartbeat") if s else None
+        if last_hb_str and conn_status == "connected":
+            try:
+                last_hb = datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
+                if (now - last_hb).total_seconds() > 35:
+                    conn_status = "disconnected"
+            except Exception:
+                pass
+
         results.append({
             "id": s.get("id") or f"temp-{attempt_id}",
             "attempt_id": attempt_id,
@@ -1991,7 +2078,7 @@ async def get_live_students(user=Depends(require_admin)):
             "os": s.get("os", "") if s else "",
             "ip_address": s.get("ip_address", "") if s else "",
             "login_time": att.get("started_at"),
-            "connection_status": s.get("connection_status", "connected") if s else "disconnected",
+            "connection_status": conn_status,
             "is_paused": s.get("is_paused", False) if s else False,
             "kick_reason": kick_reason
         })
