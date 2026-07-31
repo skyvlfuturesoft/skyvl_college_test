@@ -49,6 +49,62 @@ export default function ResultPage() {
   const scorePercentage = result ? (result.percentage !== undefined ? result.percentage : Math.round((result.score / result.total_marks) * 100) || 0) : 0;
   const isPassed = scorePercentage >= (result?.exams?.pass_threshold || 50);
 
+  const getUserAnswerSummary = (ans, q, isSkipped) => {
+    if (isSkipped) return '(Skipped - No Answer Provided)';
+    const qType = q.question_type || 'mcq';
+    if (qType === 'mcq' || qType === 'image_mcq') {
+      if (ans.selected_option !== null && ans.selected_option !== undefined && ans.selected_option !== '') {
+        const optIdx = Number(ans.selected_option);
+        if (!isNaN(optIdx) && q.options && q.options[optIdx] !== undefined) {
+          const letter = String.fromCharCode(65 + optIdx);
+          return `Option ${letter}: ${q.options[optIdx]}`;
+        }
+      }
+      if (ans.selected_answer_text) {
+        return ans.selected_answer_text;
+      }
+      return '(Skipped)';
+    } else {
+      return ans.selected_answer_text || '(Skipped)';
+    }
+  };
+
+  const getCorrectAnswerSummary = (q) => {
+    const qType = q.question_type || 'mcq';
+    if (qType === 'mcq' || qType === 'image_mcq') {
+      const options = q.options || [];
+      let corrIdx = -1;
+      
+      if (q.correct_answer !== null && q.correct_answer !== undefined) {
+        if (typeof q.correct_answer === 'number' || !isNaN(Number(q.correct_answer))) {
+          const parsed = Number(q.correct_answer);
+          if (parsed >= 0 && parsed < options.length) corrIdx = parsed;
+        } else if (typeof q.correct_answer === 'string') {
+          const clean = q.correct_answer.trim().toUpperCase();
+          if (clean.length === 1 && clean >= 'A' && clean <= 'Z') {
+            const letterIdx = clean.charCodeAt(0) - 65;
+            if (letterIdx >= 0 && letterIdx < options.length) corrIdx = letterIdx;
+          }
+          if (corrIdx === -1) {
+            corrIdx = options.findIndex((opt) => String(opt).trim().toLowerCase() === q.correct_answer.trim().toLowerCase());
+          }
+        }
+      }
+      
+      if (corrIdx !== -1 && options[corrIdx] !== undefined) {
+        const letter = String.fromCharCode(65 + corrIdx);
+        return `Option ${letter}: ${options[corrIdx]}`;
+      }
+      return q.correct_answer !== undefined && q.correct_answer !== null ? String(q.correct_answer) : 'N/A';
+    } else {
+      const acc = Array.isArray(q.accepted_answers) ? [...q.accepted_answers] : [];
+      if (q.correct_answer && !acc.includes(q.correct_answer)) {
+        acc.push(q.correct_answer);
+      }
+      return acc.length > 0 ? acc.join('  /  ') : (q.correct_answer || 'N/A');
+    }
+  };
+
   return (
     <div className="app-container">
       {/* Print Styles Injection */}
@@ -198,7 +254,7 @@ export default function ResultPage() {
                 
                 // Determine skipped status
                 const isSkipped = (qType === 'mcq' || qType === 'image_mcq')
-                  ? (ans.selected_option === null || ans.selected_option === undefined)
+                  ? (ans.selected_option === null || ans.selected_option === undefined || ans.selected_option === '')
                   : (!ans.selected_answer_text || ans.selected_answer_text.trim() === '');
 
                 let badgeText = 'Wrong';
@@ -262,29 +318,84 @@ export default function ResultPage() {
                           </div>
                         )}
 
-                        <div style={{ fontWeight: 600, color: 'var(--text)', marginBottom: 12 }}>
+                        <div style={{ fontWeight: 600, color: 'var(--text)', marginBottom: 14 }}>
                           {q.question_text}
                         </div>
 
-                        {/* Answers Options / Submissions */}
-                        {(qType === 'mcq' || qType === 'image_mcq') ? (
+                        {/* Summary Comparison Box */}
+                        <div style={{
+                          background: '#FFFFFF',
+                          padding: '12px 16px',
+                          borderRadius: 8,
+                          border: '1px solid var(--border-light)',
+                          marginBottom: 16,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                          fontSize: '0.9rem'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <span style={{ fontWeight: 600, color: 'var(--text-secondary)', minWidth: 130 }}>
+                              Your Answer:
+                            </span>
+                            <span style={{
+                              fontWeight: 700,
+                              color: isCorrect ? '#065F46' : isSkipped ? '#4B5563' : '#991B1B',
+                              background: isCorrect ? '#D1FAE5' : isSkipped ? '#F3F4F6' : '#FEE2E2',
+                              padding: '3px 10px',
+                              borderRadius: 6
+                            }}>
+                              {getUserAnswerSummary(ans, q, isSkipped)}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <span style={{ fontWeight: 600, color: 'var(--text-secondary)', minWidth: 130 }}>
+                              Correct Answer:
+                            </span>
+                            <span style={{
+                              fontWeight: 700,
+                              color: '#065F46',
+                              background: '#D1FAE5',
+                              padding: '3px 10px',
+                              borderRadius: 6
+                            }}>
+                              {getCorrectAnswerSummary(q)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Answers Options for MCQ */}
+                        {(qType === 'mcq' || qType === 'image_mcq') && (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                             {(q.options || []).map((opt, optIdx) => {
                               let labelStyle = { color: 'var(--text-secondary)' };
                               let optionBadge = null;
 
-                              if (optIdx === q.correct_answer) {
+                              const isCorrectAnswerOption = q.correct_answer !== null && q.correct_answer !== undefined && (
+                                optIdx === q.correct_answer ||
+                                String(optIdx) === String(q.correct_answer).trim() ||
+                                (typeof q.correct_answer === 'string' && q.correct_answer.trim().toUpperCase() === String.fromCharCode(65 + optIdx)) ||
+                                (Array.isArray(q.options) && q.options[optIdx] && String(q.options[optIdx]).trim().toLowerCase() === String(q.correct_answer).trim().toLowerCase())
+                              );
+
+                              const isSelectedByStudent = ans.selected_option !== null && ans.selected_option !== undefined && (
+                                optIdx === ans.selected_option ||
+                                String(optIdx) === String(ans.selected_option).trim()
+                              );
+
+                              if (isCorrectAnswerOption) {
                                 labelStyle = { color: '#065F46', fontWeight: 600 };
                                 optionBadge = <span style={{ marginLeft: 8, fontSize: '0.72rem', background: '#D1FAE5', color: '#065F46', padding: '1px 6px', borderRadius: 4 }}>Correct Answer</span>;
                               }
                               
-                              if (optIdx === ans.selected_option) {
+                              if (isSelectedByStudent) {
                                 if (isCorrect) {
                                   labelStyle = { color: '#065F46', fontWeight: 700 };
-                                  optionBadge = <span style={{ marginLeft: 8, fontSize: '0.72rem', background: '#D1FAE5', color: '#065F46', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>Your Correct Choice</span>;
+                                  optionBadge = <span style={{ marginLeft: 8, fontSize: '0.72rem', background: '#D1FAE5', color: '#065F46', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>Your Choice (Correct)</span>;
                                 } else {
                                   labelStyle = { color: '#991B1B', fontWeight: 700 };
-                                  optionBadge = <span style={{ marginLeft: 8, fontSize: '0.72rem', background: '#FEE2E2', color: '#991B1B', padding: '1px 6px', borderRadius: 4 }}>Your Wrong Choice</span>;
+                                  optionBadge = <span style={{ marginLeft: 8, fontSize: '0.72rem', background: '#FEE2E2', color: '#991B1B', padding: '1px 6px', borderRadius: 4 }}>Your Choice (Wrong)</span>;
                                 }
                               }
 
@@ -296,22 +407,6 @@ export default function ResultPage() {
                                 </div>
                               );
                             })}
-                          </div>
-                        ) : (
-                          // Text representation for FIB
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: '0.9rem', background: '#FFFFFF', padding: '12px 16px', borderRadius: 6, border: '1px solid var(--border-light)' }}>
-                            <div>
-                              <span style={{ fontWeight: 600, color: 'var(--text-secondary)', marginRight: 6 }}>Your Submitted Answer:</span>
-                              <span style={{ fontWeight: 700, color: isCorrect ? '#065F46' : isSkipped ? '#4B5563' : '#991B1B' }}>
-                                {ans.selected_answer_text || '(Skipped)'}
-                              </span>
-                            </div>
-                            <div style={{ marginTop: 4 }}>
-                              <span style={{ fontWeight: 600, color: 'var(--text-secondary)', marginRight: 6 }}>Accepted Answer Options:</span>
-                              <span style={{ fontWeight: 600, color: '#065F46' }}>
-                                {(q.accepted_answers || []).join('  /  ')}
-                              </span>
-                            </div>
                           </div>
                         )}
                       </div>

@@ -150,11 +150,15 @@ export default function ExamPage() {
       const promises = Object.entries(dirty).map(async ([qId, val]) => {
         let retries = 3;
         let success = false;
+        const questionObj = questions.find((q) => q.id === qId);
         const isMcq = typeof val === 'number';
+        const selOpt = isMcq ? val : null;
+        const selTxt = isMcq ? (questionObj?.options?.[val] || null) : val;
+        
         const bodyPayload = {
           question_id: qId,
-          selected_option: isMcq ? val : null,
-          selected_answer_text: isMcq ? null : val
+          selected_option: selOpt,
+          selected_answer_text: selTxt
         };
 
         while (retries > 0 && !success) {

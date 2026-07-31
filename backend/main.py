@@ -1194,11 +1194,21 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
         except Exception:
             pass  # skip timer check on parse error
 
+    # Fetch question to evaluate correctness dynamically
+    is_correct = False
+    try:
+        q_res = sb.table("questions").select("*").eq("id", data.question_id).single().execute()
+        if q_res.data:
+            _, is_correct = evaluate_question_answer(q_res.data, data.selected_option, data.selected_answer_text)
+    except Exception:
+        pass
+
     # Upsert answer directly using the unique constraint (attempt_id, question_id)
     answer_payload = {
         "attempt_id": attempt_id,
         "question_id": data.question_id,
         "selected_option": data.selected_option,
+        "is_correct": is_correct,
     }
 
     def _do_upsert():
@@ -1212,6 +1222,100 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
 
     await run_in_threadpool(_do_upsert)
     return {"success": True}
+
+
+def evaluate_question_answer(q: dict, selected_opt: any, selected_txt: any):
+    """
+    Evaluates whether a student's answer for question `q` is correct or skipped.
+    Returns: (is_skipped: bool, is_correct: bool)
+    """
+    q_type = q.get("question_type") or "mcq"
+    corr_ans = q.get("correct_answer")
+    
+    # 1. Determine if skipped
+    is_skipped = False
+    if q_type in ("mcq", "image_mcq"):
+        if selected_opt is None or selected_opt == "" or selected_opt == -1:
+            is_skipped = True
+    else:
+        if selected_txt is None or str(selected_txt).strip() == "":
+            is_skipped = True
+            
+    if is_skipped:
+        return True, False
+
+    # 2. Determine correctness
+    is_correct = False
+    if q_type in ("mcq", "image_mcq"):
+        options = q.get("options") or []
+        
+        # Try converting selected_opt to integer index
+        opt_idx = None
+        try:
+            if selected_opt is not None and str(selected_opt).strip() != "":
+                opt_idx = int(selected_opt)
+        except (ValueError, TypeError):
+            pass
+
+        if opt_idx is not None:
+            # Check A: Direct int / str int equality (e.g. opt_idx == 0 and corr_ans == 0 or "0")
+            try:
+                if corr_ans is not None and int(corr_ans) == opt_idx:
+                    is_correct = True
+            except (ValueError, TypeError):
+                pass
+
+            # Check B: corr_ans is a single letter ("A", "B", "C", "D")
+            if not is_correct and isinstance(corr_ans, str) and len(corr_ans.strip()) == 1:
+                clean_letter = corr_ans.strip().upper()
+                if 'A' <= clean_letter <= 'Z':
+                    letter_idx = ord(clean_letter) - ord('A')
+                    if letter_idx == opt_idx:
+                        is_correct = True
+
+            # Check C: corr_ans matches option text at options[opt_idx]
+            if not is_correct and isinstance(corr_ans, str) and 0 <= opt_idx < len(options):
+                opt_str = str(options[opt_idx]).strip().lower()
+                corr_str = corr_ans.strip().lower()
+                if opt_str == corr_str:
+                    is_correct = True
+        else:
+            # selected_opt is text instead of index
+            if isinstance(selected_opt, str):
+                stud_str = selected_opt.strip().lower()
+                corr_str = str(corr_ans).strip().lower() if corr_ans is not None else ""
+                if stud_str and stud_str == corr_str:
+                    is_correct = True
+                elif isinstance(options, list):
+                    for idx, opt_text in enumerate(options):
+                        if str(opt_text).strip().lower() == stud_str:
+                            _, is_correct = evaluate_question_answer(q, idx, None)
+                            break
+
+    elif q_type in ("fill_in_blank", "image_fib"):
+        student_ans = str(selected_txt).strip().lower()
+        accepted_list = q.get("accepted_answers") or []
+        
+        if isinstance(accepted_list, str):
+            try:
+                import json
+                accepted_list = json.loads(accepted_list)
+            except Exception:
+                accepted_list = [accepted_list]
+        if not isinstance(accepted_list, list):
+            accepted_list = [accepted_list]
+            
+        accepted_set = set()
+        for item in accepted_list:
+            if item is not None and str(item).strip() != "":
+                accepted_set.add(str(item).strip().lower())
+
+        if corr_ans is not None and str(corr_ans).strip() != "":
+            accepted_set.add(str(corr_ans).strip().lower())
+            
+        is_correct = student_ans in accepted_set
+
+    return False, is_correct
 
 
 def is_attempt_authorized(attempt_data: dict, user: dict) -> bool:
@@ -1261,7 +1365,7 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
         answer_map = {a["question_id"]: (a.get("selected_option"), None) for a in (answers.data or [])}
     
     try:
-        questions = sb.table("questions").select("id, correct_answer, accepted_answers, question_type, marks").eq("exam_id", attempt.data["exam_id"]).execute()
+        questions = sb.table("questions").select("id, correct_answer, accepted_answers, question_type, options, marks").eq("exam_id", attempt.data["exam_id"]).execute()
     except Exception:
         # Fallback if migration_v6 columns do not exist
         questions = sb.table("questions").select("id, correct_answer, marks").eq("exam_id", attempt.data["exam_id"]).execute()
@@ -1269,6 +1373,7 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
             for q in questions.data:
                 q["accepted_answers"] = []
                 q["question_type"] = "mcq"
+                q["options"] = []
     
     score = 0.0
     correct_count = 0
@@ -1278,8 +1383,8 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
     answers_to_update = []
     
     for q in (questions.data or []):
-        total_marks += q.get("marks") or 1
-        q_type = q.get("question_type") or "mcq"
+        q_marks = q.get("marks") or 1
+        total_marks += q_marks
         ans_data = answer_map.get(q["id"])
         
         selected_opt = None
@@ -1287,36 +1392,13 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
         if ans_data:
             selected_opt, selected_txt = ans_data
             
-        is_correct = False
-        is_skipped = True
+        is_skipped, is_correct = evaluate_question_answer(q, selected_opt, selected_txt)
         
-        if q_type in ("mcq", "image_mcq"):
-            if selected_opt is not None:
-                is_skipped = False
-                is_correct = selected_opt == q.get("correct_answer")
-        elif q_type in ("fill_in_blank", "image_fib"):
-            if selected_txt is not None and str(selected_txt).strip() != "":
-                is_skipped = False
-                # Match case-insensitively and trim whitespace
-                student_ans = str(selected_txt).strip().lower()
-                accepted_list = q.get("accepted_answers") or []
-                
-                if isinstance(accepted_list, str):
-                    try:
-                        import json
-                        accepted_list = json.loads(accepted_list)
-                    except Exception:
-                        accepted_list = [accepted_list]
-                if not isinstance(accepted_list, list):
-                    accepted_list = [accepted_list]
-                    
-                is_correct = any(str(ans).strip().lower() == student_ans for ans in accepted_list if ans is not None)
-                
         if is_skipped:
             skipped_count += 1
         elif is_correct:
             correct_count += 1
-            score += q.get("marks") or 1
+            score += q_marks
         else:
             wrong_count += 1
             score -= neg_marking
@@ -1435,7 +1517,7 @@ async def get_attempt(attempt_id: str, user=Depends(get_current_user)):
 async def get_result(attempt_id: str, user=Depends(get_current_user)):
     sb = get_supabase()
     try:
-        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration, pass_threshold)").eq("id", attempt_id).single().execute()
+        attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration, pass_threshold, negative_marking)").eq("id", attempt_id).single().execute()
     except Exception:
         # Fallback if migration_v6 columns do not exist
         attempt = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, exams(title, duration, pass_threshold)").eq("id", attempt_id).single().execute()
@@ -1444,6 +1526,8 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Attempt not found")
 
     exam_id = attempt.data.get("exam_id")
+    exam_info = attempt.data.get("exams") or {}
+    neg_marking = exam_info.get("negative_marking") or 0.0
 
     # Fetch ALL questions belonging to this exam to include skipped questions in breakdown
     all_questions = []
@@ -1487,49 +1571,62 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
         q_id = q["id"]
         q_marks = q.get("marks") or 1
         total_marks += q_marks
-        q_type = q.get("question_type") or "mcq"
 
         if q_id in ans_map:
             ans = ans_map[q_id]
-            ans_copy = {**ans, "questions": q}
+            sel_opt = ans.get("selected_option")
+            sel_txt = ans.get("selected_answer_text")
         else:
-            ans_copy = {
-                "id": f"skipped-{q_id}",
-                "attempt_id": attempt_id,
-                "question_id": q_id,
-                "selected_option": None,
-                "selected_answer_text": None,
-                "is_correct": False,
-                "questions": q
-            }
+            sel_opt = None
+            sel_txt = None
 
-        # Check if skipped
-        is_skipped = False
-        if q_type in ("mcq", "image_mcq"):
-            if ans_copy.get("selected_option") is None:
-                is_skipped = True
-        else:
-            sel_txt = ans_copy.get("selected_answer_text")
-            if sel_txt is None or str(sel_txt).strip() == "":
-                is_skipped = True
+        # Auto-fill text for MCQ if missing
+        q_type = q.get("question_type") or "mcq"
+        if (q_type in ("mcq", "image_mcq") or not q_type) and (sel_txt is None or str(sel_txt).strip() == ""):
+            opts = q.get("options") or []
+            try:
+                if sel_opt is not None and str(sel_opt).strip() != "":
+                    idx = int(sel_opt)
+                    if 0 <= idx < len(opts):
+                        sel_txt = opts[idx]
+            except Exception:
+                pass
+
+        is_skipped, is_correct = evaluate_question_answer(q, sel_opt, sel_txt)
+
+        ans_copy = {
+            "id": ans_map[q_id]["id"] if q_id in ans_map else f"skipped-{q_id}",
+            "attempt_id": attempt_id,
+            "question_id": q_id,
+            "selected_option": sel_opt,
+            "selected_answer_text": sel_txt,
+            "is_correct": is_correct,
+            "questions": q
+        }
 
         if is_skipped:
             skip += 1
-        elif ans_copy.get("is_correct") is True:
+        elif is_correct:
             corr += 1
             calculated_score += q_marks
         else:
             wrong += 1
+            calculated_score -= neg_marking
 
         full_answers.append(ans_copy)
 
-    score = attempt.data.get("score") if attempt.data.get("score") is not None else calculated_score
+    final_score = attempt.data.get("score")
+    if final_score is None or attempt.data.get("status") not in ("submitted", "auto_submitted"):
+        final_score = int(round(max(0.0, calculated_score)))
+    else:
+        final_score = int(round(max(0.0, float(final_score))))
+
     if total_marks <= 0:
         total_marks = max(len(all_questions), 1)
 
-    attempt.data["score"] = score
+    attempt.data["score"] = final_score
     attempt.data["total_marks"] = total_marks
-    attempt.data["percentage"] = round((score / total_marks) * 100, 2) if total_marks > 0 else 0.0
+    attempt.data["percentage"] = round((final_score / total_marks) * 100, 2) if total_marks > 0 else 0.0
     attempt.data["correct_count"] = corr
     attempt.data["skipped_count"] = skip
     attempt.data["wrong_count"] = wrong
