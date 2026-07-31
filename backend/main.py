@@ -1861,7 +1861,7 @@ async def get_admin_dashboard(user=Depends(require_admin)):
 async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
     try:
         sb = get_supabase()
-        query = sb.table("attempts").select("*, profiles(name, email), exams(title)").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
+        query = sb.table("attempts").select("*, profiles(name, email), exams(title, pass_threshold)").order("created_at", desc=True)
         if exam_id:
             query = query.eq("exam_id", exam_id)
         result = query.execute()
@@ -1870,7 +1870,7 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
         print("Error fetching results from Supabase:", err)
         try:
             sb = get_supabase()
-            query = sb.table("attempts").select("*").in_("status", ["submitted", "auto_submitted"]).order("submitted_at", desc=True)
+            query = sb.table("attempts").select("*").order("created_at", desc=True)
             if exam_id:
                 query = query.eq("exam_id", exam_id)
             result = query.execute()
@@ -1894,14 +1894,26 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
             r["time_taken"] = 0
 
         # Safe defaults for profile metadata
-        if not r.get("profiles"):
-            r["profiles"] = {"name": r.get("student_name", "Student"), "email": r.get("student_email", ""), "department": "General", "section": "A"}
+        p = r.get("profiles")
+        if not p or not isinstance(p, dict):
+            r["profiles"] = {
+                "name": r.get("student_name") or "Student",
+                "email": r.get("student_email") or "",
+                "department": "General",
+                "section": "A"
+            }
         else:
-            p = r["profiles"]
-            if "department" not in p:
+            if not p.get("name"):
+                p["name"] = r.get("student_name") or "Student"
+            if not p.get("email"):
+                p["email"] = r.get("student_email") or ""
+            if "department" not in p or not p["department"]:
                 p["department"] = "General"
-            if "section" not in p:
+            if "section" not in p or not p["section"]:
                 p["section"] = "A"
+
+        if not r.get("exams") or not isinstance(r.get("exams"), dict):
+            r["exams"] = {"title": "Examination", "pass_threshold": 50}
 
     return {"results": data}
 

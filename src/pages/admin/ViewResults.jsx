@@ -64,11 +64,12 @@ export default function ViewResults() {
   // Client-side filtering logic
   const filteredResults = results.filter((res) => {
     const profile = res.profiles || {};
-    const name = (profile.name || '').toLowerCase();
-    const email = (profile.email || '').toLowerCase();
+    const name = (profile.name || res.student_name || '').toLowerCase();
+    const email = (profile.email || res.student_email || '').toLowerCase();
+    const examTitle = (res.exams?.title || '').toLowerCase();
     const query = searchQuery.toLowerCase();
     
-    const matchesSearch = name.includes(query) || email.includes(query);
+    const matchesSearch = name.includes(query) || email.includes(query) || examTitle.includes(query);
     const matchesDept = selectedDept ? profile.department === selectedDept : true;
     const matchesSection = selectedSection ? profile.section === selectedSection : true;
 
