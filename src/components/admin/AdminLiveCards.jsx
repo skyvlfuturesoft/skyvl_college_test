@@ -18,23 +18,31 @@ export default function AdminLiveCards({ students = [], stats = {}, kickedCount 
   });
 
   useEffect(() => {
-    const offlineCount = students.filter(s => s.connection_status === 'disconnected').length;
-    const uniqueExams = new Set(students.map(s => s.exam_name)).size;
-    const totalProgress = students.reduce((acc, s) => acc + (s.progress_percent || 0), 0);
-    const avgProgress = students.length > 0 ? Math.round(totalProgress / students.length) : 0;
+    // Calculate stats strictly from connected, actively writing student sessions
+    const activeWritingStudents = students.filter(
+      (s) => s.status === 'in_progress' && !s.is_paused && s.connection_status === 'connected'
+    );
+    const onlineStudents = students.filter((s) => s.connection_status === 'connected');
+    const offlineStudents = students.filter((s) => s.connection_status === 'disconnected');
+    const uniqueExams = new Set(activeWritingStudents.map((s) => s.exam_name)).size;
+    
+    const totalProgress = activeWritingStudents.reduce((acc, s) => acc + (s.progress_percent || 0), 0);
+    const calculatedAvgProgress = activeWritingStudents.length > 0 ? Math.round(totalProgress / activeWritingStudents.length) : 0;
+    const currentViolations = activeWritingStudents.reduce((acc, s) => acc + (s.violation_count || 0), 0);
+    const terminatedCount = students.filter((s) => s.status === 'terminated').length;
 
     setLiveStats({
-      online: stats.total_students !== undefined ? stats.total_students : students.length,
-      active: stats.active_attempts || 0,
+      online: onlineStudents.length,
+      active: activeWritingStudents.length,
       completed: stats.completed_attempts || 0,
-      kicked: stats.kicked_students !== undefined ? stats.kicked_students : kickedCount,
-      violations: stats.total_violations || 0,
-      offline: offlineCount,
-      exams: stats.total_exams || uniqueExams,
-      avgProgress: avgProgress,
+      kicked: terminatedCount > 0 ? terminatedCount : (kickedCount || stats.kicked_students || 0),
+      violations: currentViolations,
+      offline: offlineStudents.length,
+      exams: uniqueExams,
+      avgProgress: calculatedAvgProgress,
       avgScore: stats.avg_score !== undefined ? stats.avg_score : 0,
-      activeRules: stats.active_rules || 6,
-      networkLogs: offlineCount
+      activeRules: 6,
+      networkLogs: offlineStudents.length
     });
   }, [students, stats, kickedCount]);
 

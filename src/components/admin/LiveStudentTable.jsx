@@ -13,10 +13,13 @@ export default function LiveStudentTable({ students = [], loading = false, onAct
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
+  // Filter state including Login Status
+  const [loginStatusFilter, setLoginStatusFilter] = useState('all');
+
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, statusFilter, connectionFilter, pageSize]);
+  }, [searchTerm, statusFilter, connectionFilter, loginStatusFilter, pageSize]);
 
   const handleAction = async (action, attemptId) => {
     try {
@@ -69,7 +72,18 @@ export default function LiveStudentTable({ students = [], loading = false, onAct
       matchesConnection = s.connection_status === 'disconnected';
     }
 
-    return matchesSearch && matchesStatus && matchesConnection;
+    let matchesLoginStatus = true;
+    if (loginStatusFilter === 'active') {
+      matchesLoginStatus = s.connection_status === 'connected' && s.status === 'in_progress' && !s.is_paused;
+    } else if (loginStatusFilter === 'paused') {
+      matchesLoginStatus = s.is_paused;
+    } else if (loginStatusFilter === 'terminated') {
+      matchesLoginStatus = s.status === 'terminated';
+    } else if (loginStatusFilter === 'offline') {
+      matchesLoginStatus = s.connection_status === 'disconnected';
+    }
+
+    return matchesSearch && matchesStatus && matchesConnection && matchesLoginStatus;
   });
 
   // Sort students
@@ -153,6 +167,21 @@ export default function LiveStudentTable({ students = [], loading = false, onAct
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Login Status:</span>
+            <select
+              value={loginStatusFilter}
+              onChange={(e) => setLoginStatusFilter(e.target.value)}
+              style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border-light)', fontSize: '0.82rem' }}
+            >
+              <option value="all">All</option>
+              <option value="active">Logged In (Active)</option>
+              <option value="paused">Paused</option>
+              <option value="terminated">Terminated</option>
+              <option value="offline">Offline / Logged Out</option>
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Connection:</span>
             <select
               value={connectionFilter}
@@ -197,6 +226,7 @@ export default function LiveStudentTable({ students = [], loading = false, onAct
                   <th style={{ cursor: 'pointer' }} onClick={() => handleSort('student_name')}>
                     Student {sortField === 'student_name' && (sortAsc ? '▲' : '▼')}
                   </th>
+                  <th>Login Status</th>
                   <th>Exam</th>
                   <th style={{ textAlign: 'center' }}>Q No.</th>
                   <th style={{ textAlign: 'center' }}>Answered</th>
@@ -228,6 +258,33 @@ export default function LiveStudentTable({ students = [], loading = false, onAct
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                           {s.student_email || '—'}
                         </div>
+                      </td>
+
+                      {/* Login Status */}
+                      <td>
+                        {isTerminated ? (
+                          <span style={{ padding: '3px 8px', borderRadius: 12, fontSize: '0.75rem', fontWeight: 600, background: '#FEE2E2', color: '#991B1B', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            🔒 Terminated
+                          </span>
+                        ) : isPaused ? (
+                          <span style={{ padding: '3px 8px', borderRadius: 12, fontSize: '0.75rem', fontWeight: 600, background: '#FEF3C7', color: '#92400E', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            ⏸️ Paused
+                          </span>
+                        ) : s.connection_status === 'connected' ? (
+                          <span style={{ padding: '3px 8px', borderRadius: 12, fontSize: '0.75rem', fontWeight: 600, background: '#D1FAE5', color: '#065F46', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
+                            Logged In (Active)
+                          </span>
+                        ) : (
+                          <span style={{ padding: '3px 8px', borderRadius: 12, fontSize: '0.75rem', fontWeight: 600, background: '#F3F4F6', color: '#4B5563', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            ⚪ Offline / Logged Out
+                          </span>
+                        )}
+                        {s.login_time && (
+                          <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: 2 }}>
+                            Started: {new Date(s.login_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        )}
                       </td>
 
                       {/* Exam */}

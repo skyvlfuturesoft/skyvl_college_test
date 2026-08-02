@@ -104,7 +104,7 @@ export default function ViewResults() {
     })[0];
   }
 
-  // Export spreadsheet utility (CSV)
+  // Export spreadsheet utility (CSV with UTF-8 BOM for perfect Excel compatibility)
   const exportToCSV = () => {
     const headers = ['Student Name', 'Email', 'Department', 'Section', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
     let rows = [];
@@ -113,6 +113,7 @@ export default function ViewResults() {
     if (filteredResults.length > 0) {
       rows = filteredResults.map(res => {
         const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
+        const dateStr = res.submitted_at || res.created_at ? new Date(res.submitted_at || res.created_at).toLocaleString() : '—';
         return [
           res.profiles?.name || '—',
           res.profiles?.email || '—',
@@ -122,19 +123,20 @@ export default function ViewResults() {
           res.score,
           res.total_marks,
           `${percentage}%`,
-          res.violation_count,
-          new Date(res.submitted_at).toLocaleString(),
-          res.status
+          res.violation_count || 0,
+          dateStr,
+          res.status || 'submitted'
         ];
       });
     } else {
       fileName = `exam_results_empty.csv`;
     }
     
-    const csvContent = [
+    const csvContent = '\uFEFF' + [
       headers.join(','),
       ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
     ].join('\n');
+    
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -145,67 +147,38 @@ export default function ViewResults() {
     document.body.removeChild(link);
   };
 
-  // Export spreadsheet utility (Excel compatible XML format)
+  // Export spreadsheet utility (Excel Spreadsheet CSV format with UTF-8 BOM)
   const exportToExcel = () => {
-    let fileName = `exam_results_${new Date().toISOString().slice(0, 10)}.xls`;
     const headers = ['Student Name', 'Email', 'Department', 'Section', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
+    let rows = [];
+    let fileName = `exam_results_${new Date().toISOString().slice(0, 10)}.csv`;
     
-    let html = `
-      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
-      <head>
-        <!--[if gte mso 9]>
-        <xml>
-          <x:ExcelWorkbook>
-            <x:ExcelWorksheets>
-              <x:ExcelWorksheet>
-                <x:Name>Results</x:Name>
-                <x:WorksheetOptions>
-                  <x:DisplayGridlines/>
-                </x:WorksheetOptions>
-              </x:ExcelWorksheet>
-            </x:ExcelWorksheets>
-          </x:ExcelWorkbook>
-        </xml>
-        <![endif]-->
-        <style>
-          table { border-collapse: collapse; }
-          th { background-color: #1565C0; color: #ffffff; font-weight: bold; border: 1px solid #dddddd; padding: 8px; font-family: sans-serif; }
-          td { border: 1px solid #dddddd; padding: 6px; font-family: sans-serif; }
-        </style>
-      </head>
-      <body>
-        <table>
-          <thead>
-            <tr>
-              ${headers.map(h => `<th>${h}</th>`).join('')}
-            </tr>
-          </thead>
-          <tbody>
-            ${filteredResults.map(res => {
-              const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
-              return `
-                <tr>
-                  <td>${res.profiles?.name || '—'}</td>
-                  <td>${res.profiles?.email || '—'}</td>
-                  <td>${res.profiles?.department || '—'}</td>
-                  <td>${res.profiles?.section || '—'}</td>
-                  <td>${res.exams?.title || '—'}</td>
-                  <td>${res.score}</td>
-                  <td>${res.total_marks}</td>
-                  <td>${percentage}%</td>
-                  <td>${res.violation_count}</td>
-                  <td>${new Date(res.submitted_at).toLocaleString()}</td>
-                  <td>${res.status}</td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-      </body>
-      </html>
-    `;
+    if (filteredResults.length > 0) {
+      rows = filteredResults.map(res => {
+        const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
+        const dateStr = res.submitted_at || res.created_at ? new Date(res.submitted_at || res.created_at).toLocaleString() : '—';
+        return [
+          res.profiles?.name || '—',
+          res.profiles?.email || '—',
+          res.profiles?.department || '—',
+          res.profiles?.section || '—',
+          res.exams?.title || '—',
+          res.score,
+          res.total_marks,
+          `${percentage}%`,
+          res.violation_count || 0,
+          dateStr,
+          res.status || 'submitted'
+        ];
+      });
+    }
     
-    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+    const csvContent = '\uFEFF' + [
+      headers.join(','),
+      ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
+    ].join('\n');
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
@@ -453,15 +426,16 @@ export default function ViewResults() {
                             {res.violation_count} Flagged
                           </span>
                         </td>
-                        <td>{new Date(res.submitted_at).toLocaleString()}</td>
+                        <td>{res.submitted_at || res.started_at || res.created_at ? new Date(res.submitted_at || res.started_at || res.created_at).toLocaleString() : '—'}</td>
                         <td className="no-print">
                           <button
                             className="btn btn-secondary"
                             onClick={() => navigate(`/student/result/${res.id}`)}
-                            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem' }}
+                            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', backgroundColor: 'var(--lighter-blue)', color: 'var(--primary)', border: '1px solid var(--border-light)' }}
+                            title="View Written Test Sheet & Evaluation Report"
                           >
                             <Eye size={14} />
-                            Review
+                            View Written Report
                           </button>
                         </td>
                       </tr>

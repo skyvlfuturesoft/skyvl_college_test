@@ -6,6 +6,7 @@ export default function ActivityFeed({ events = [] }) {
 
   const getEmoji = (type) => {
     if (!type) return '📋';
+    if (type.includes('login')) return '🔑';
     if (type.includes('kick')) return '🚫';
     if (type.includes('violation') || type.includes('warning')) return '⚠️';
     if (type.includes('submit')) return '📤';

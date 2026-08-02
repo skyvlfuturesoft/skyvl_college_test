@@ -351,28 +351,25 @@ export default function CreateExam() {
         }
       }
 
-      // Question set sync
-      const oldQsRes = await api(`/api/exams/${examIdToUse}/questions`);
-      const oldQuestions = oldQsRes.questions || [];
-      for (const oldQ of oldQuestions) {
-        await api(`/api/questions/${oldQ.id}`, { method: 'DELETE' });
-      }
+      // Question set sync using fast bulk API endpoint
+      const formattedQuestions = questions.map(q => ({
+        exam_id: examIdToUse,
+        question_text: q.question_text,
+        question_type: q.question_type || 'mcq',
+        image_url: q.image_url || '',
+        options: q.options || [],
+        correct_answer: parseInt(q.correct_answer) || 0,
+        accepted_answers: q.accepted_answers || [],
+        marks: q.marks || 1
+      }));
 
-      for (const q of questions) {
-        await api('/api/questions', {
-          method: 'POST',
-          body: {
-            exam_id: examIdToUse,
-            question_text: q.question_text,
-            question_type: q.question_type,
-            image_url: q.image_url || '',
-            options: q.options || [],
-            correct_answer: parseInt(q.correct_answer) || 0,
-            accepted_answers: q.accepted_answers || [],
-            marks: q.marks
-          }
-        });
-      }
+      await api('/api/questions/bulk', {
+        method: 'POST',
+        body: {
+          exam_id: examIdToUse,
+          questions: formattedQuestions
+        }
+      });
 
       alert(publishStatus ? 'Exam published successfully!' : 'Draft saved successfully!');
       navigate('/admin');

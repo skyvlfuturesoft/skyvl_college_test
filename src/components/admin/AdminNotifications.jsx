@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
-import { X, AlertTriangle, ShieldAlert, CheckCircle, Radio } from 'lucide-react';
+import { X, AlertTriangle, ShieldAlert, CheckCircle, Radio, LogIn } from 'lucide-react';
 import '../../proctor.css';
 
 export default function AdminNotifications({ events = [] }) {
@@ -16,6 +16,7 @@ export default function AdminNotifications({ events = [] }) {
         if (type.includes('violation') || type.includes('warning')) toastType = 'violation';
         else if (type.includes('kicked')) toastType = 'kick';
         else if (type.includes('submitted')) toastType = 'submit';
+        else if (type.includes('login')) toastType = 'login';
 
         setToasts((prev) => [
           { id: evt.id || Math.random(), message: evt.message, type: toastType, time: new Date(evt.created_at) },
@@ -44,6 +45,7 @@ export default function AdminNotifications({ events = [] }) {
       case 'violation': return <AlertTriangle size={18} style={{ color: '#D32F2F' }} />;
       case 'kick': return <ShieldAlert size={18} style={{ color: '#7F1D1D' }} />;
       case 'submit': return <CheckCircle size={18} style={{ color: '#10B981' }} />;
+      case 'login': return <LogIn size={18} style={{ color: '#2563EB' }} />;
       default: return <Radio size={18} style={{ color: 'var(--primary)' }} />;
     }
   };
@@ -59,7 +61,8 @@ export default function AdminNotifications({ events = [] }) {
             <div className="admin-toast-title">
               {toast.type === 'violation' ? 'Security Alert' :
                toast.type === 'kick' ? 'Student Kicked' :
-               toast.type === 'submit' ? 'Exam Submitted' : 'Activity'}
+               toast.type === 'submit' ? 'Exam Submitted' :
+               toast.type === 'login' ? 'User Logged In' : 'Activity'}
             </div>
             <div className="admin-toast-desc">{toast.message}</div>
           </div>

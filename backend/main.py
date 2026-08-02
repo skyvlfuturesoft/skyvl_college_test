@@ -757,6 +757,17 @@ async def register(data: RegisterInput):
             db_store.users[user_id] = new_user
             db_store.passwords[data.email] = data.password
             token = jwt.encode({"id": user_id, "email": data.email}, "mock-secret", algorithm="HS256")
+            
+            # Record registration login event in activity_logs
+            log_msg = f"👤 New user registered: {data.name} ({data.email}) as {data.role.title()}"
+            db_store.activity_logs.insert(0, {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "activity_type": "user_login",
+                "message": log_msg,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+
             return {
                 "user": new_user,
                 "session": {"access_token": token}
@@ -771,6 +782,16 @@ async def register(data: RegisterInput):
             }
         })
         if result.user:
+            try:
+                sb_service = get_supabase()
+                sb_service.table("activity_logs").insert({
+                    "user_id": str(result.user.id),
+                    "activity_type": "user_login",
+                    "message": f"👤 New user registered: {data.name} ({data.email}) as {data.role.title()}"
+                }).execute()
+            except Exception as log_err:
+                print(f"Error recording registration log: {log_err}")
+
             return {
                 "user": {"id": str(result.user.id), "email": result.user.email},
                 "session": {
@@ -794,6 +815,17 @@ async def login(data: LoginInput):
             if not user:
                 raise HTTPException(status_code=401, detail="User data missing")
             token = jwt.encode({"id": user["id"], "email": user["email"]}, "mock-secret", algorithm="HS256")
+            
+            # Record user login in activity_logs
+            log_msg = f"🔑 User {user.get('name') or user.get('email')} ({user.get('email')}) logged in as {user.get('role', 'student').title()}"
+            db_store.activity_logs.insert(0, {
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "activity_type": "user_login",
+                "message": log_msg,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+
             return {
                 "user": user,
                 "session": {
@@ -824,6 +856,18 @@ async def login(data: LoginInput):
             else:
                 role = profile_res.data[0].get("role", "student")
                 name = profile_res.data[0].get("name", "")
+
+            # Record user login in activity_logs
+            try:
+                user_display_name = name or result.user.email
+                log_msg = f"🔑 User {user_display_name} ({result.user.email}) logged in as {role.title()}"
+                sb_service.table("activity_logs").insert({
+                    "user_id": str(result.user.id),
+                    "activity_type": "user_login",
+                    "message": log_msg
+                }).execute()
+            except Exception as log_err:
+                print(f"Error recording login activity log: {log_err}")
 
             return {
                 "user": {
@@ -1331,7 +1375,7 @@ def is_attempt_authorized(attempt_data: dict, user: dict) -> bool:
 
 
 @app.post("/api/attempts/{attempt_id}/submit")
-async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_current_user)):
+async def submit_attempt(attempt_id: str, auto: bool = False, payload: Optional[dict] = None, user=Depends(get_current_user)):
     lock = await get_attempt_lock(attempt_id)
     async with lock:
         attempt_cache.invalidate(f"attempt:{attempt_id}")
@@ -1374,7 +1418,34 @@ async def submit_attempt(attempt_id: str, auto: bool = False, user=Depends(get_c
                 q["accepted_answers"] = []
                 q["question_type"] = "mcq"
                 q["options"] = []
-    
+
+    # If payload includes client-side answers, upsert any unsaved answers
+    if payload and isinstance(payload.get("answers"), dict):
+        client_answers = payload["answers"]
+        new_answers = []
+        for q in (questions.data or []):
+            q_id = q["id"]
+            if q_id in client_answers and q_id not in answer_map:
+                val = client_answers[q_id]
+                is_mcq = isinstance(val, int) or (isinstance(val, str) and str(val).isdigit())
+                sel_opt = int(val) if is_mcq else None
+                sel_txt = (q.get("options", [])[int(val)] if (is_mcq and q.get("options") and 0 <= int(val) < len(q.get("options", []))) else None) if is_mcq else str(val)
+                _, is_corr = evaluate_question_answer(q, sel_opt, sel_txt)
+                new_answers.append({
+                    "attempt_id": attempt_id,
+                    "question_id": q_id,
+                    "selected_option": sel_opt,
+                    "selected_answer_text": sel_txt,
+                    "is_correct": is_corr,
+                })
+        if new_answers:
+            try:
+                sb.table("answers").upsert(new_answers).execute()
+                for a in new_answers:
+                    answer_map[a["question_id"]] = (a["selected_option"], a["selected_answer_text"])
+            except Exception:
+                pass
+
     score = 0.0
     correct_count = 0
     wrong_count = 0
@@ -1529,7 +1600,7 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
     exam_info = attempt.data.get("exams") or {}
     neg_marking = exam_info.get("negative_marking") or 0.0
 
-    # Fetch ALL questions belonging to this exam to include skipped questions in breakdown
+    # Fetch ALL questions belonging to this exam
     all_questions = []
     try:
         q_res = sb.table("questions").select("id, exam_id, question_text, options, correct_answer, accepted_answers, question_type, image_url, marks, created_at").eq("exam_id", exam_id).order("created_at").execute()
@@ -1544,6 +1615,11 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
                 q["image_url"] = None
         except Exception:
             all_questions = []
+
+    # Preserve exact same shuffle order as presented during the exam!
+    import random
+    rng = random.Random(attempt_id)
+    rng.shuffle(all_questions)
 
     # Fetch saved student answers
     try:
@@ -1760,45 +1836,101 @@ async def recent_events(limit: int = 50, user=Depends(require_admin)):
 @app.get("/api/monitor/stats")
 async def monitor_stats(user=Depends(require_admin)):
     sb = get_supabase()
-    
-    # Try calling the optimized database function to reduce latency (1 query instead of 5 sequential)
     try:
+        now = datetime.now(timezone.utc)
+        if IS_MOCK_MODE:
+            live_data = list(db_store.live_sessions.values())
+        else:
+            live_res = sb.table("live_sessions").select("id, attempt_id, connection_status, is_paused, last_heartbeat").execute()
+            live_data = live_res.data or []
+
+        active_writing = 0
+        online_count = 0
+        disconnect_count = 0
+
+        for s in live_data:
+            last_hb_str = s.get("last_heartbeat")
+            is_connected = False
+            if last_hb_str:
+                try:
+                    hb_time = datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
+                    if (now - hb_time).total_seconds() <= 35:
+                        is_connected = True
+                except Exception:
+                    pass
+
+            if is_connected:
+                online_count += 1
+                if not s.get("is_paused"):
+                    active_writing += 1
+            else:
+                disconnect_count += 1
+
+        active_exam_ids = 0
+        if not IS_MOCK_MODE and live_data:
+            active_attempt_ids = [s["attempt_id"] for s in live_data if s.get("attempt_id")]
+            if active_attempt_ids:
+                try:
+                    att_exams = sb.table("attempts").select("exam_id").in_("id", active_attempt_ids).execute()
+                    if att_exams.data:
+                        active_exam_ids = len({a["exam_id"] for a in att_exams.data if a.get("exam_id")})
+                except Exception:
+                    pass
+        elif IS_MOCK_MODE and live_data:
+            active_exam_ids = len({s.get("exam_id") for s in live_data if s.get("exam_id")})
+
+        completed_count = 0
+        kick_count = 0
+        viol_count = 0
+        avg_score = 0
+
         if not IS_MOCK_MODE:
-            stats_res = sb.rpc("get_dashboard_stats").execute()
-            if stats_res.data:
-                return stats_res.data
+            try:
+                completed_res = sb.table("attempts").select("id", count="exact").in_("status", ["submitted", "auto_submitted"]).execute()
+                completed_count = completed_res.count or 0
+                kick_res = sb.table("kick_logs").select("id", count="exact").execute()
+                kick_count = kick_res.count or 0
+                viol_res = sb.table("violations").select("id", count="exact").execute()
+                viol_count = viol_res.count if active_writing > 0 else 0
+                att_res = sb.table("attempts").select("score, total_marks").in_("status", ["submitted", "auto_submitted", "terminated"]).execute()
+                if att_res.data:
+                    pcts = [(a.get("score", 0) / max(1, a.get("total_marks", 1))) * 100 for a in att_res.data if a.get("total_marks")]
+                    if pcts:
+                        avg_score = round(sum(pcts) / len(pcts))
+            except Exception:
+                pass
+        else:
+            completed_att = [a for a in db_store.attempts.values() if a.get("status") in ("submitted", "auto_submitted")]
+            completed_count = len(completed_att)
+            kick_count = len(db_store.kick_logs)
+            viol_count = len(db_store.violations) if active_writing > 0 else 0
+            if completed_att:
+                avg_score = round(sum(a.get("score", 0) for a in completed_att) / len(completed_att))
+
+        return {
+            "total_students": online_count,
+            "active_attempts": active_writing,
+            "completed_attempts": completed_count,
+            "total_violations": viol_count,
+            "kicked_students": kick_count,
+            "network_disconnects": disconnect_count,
+            "total_exams": active_exam_ids,
+            "avg_score": avg_score,
+            "active_rules": 6
+        }
     except Exception as e:
-        print(f"get_dashboard_stats RPC failed: {str(e)}. Falling back to parallel queries.")
-        
-    # Fallback to parallel multi-threaded queries (much faster than sequential!)
-    from concurrent.futures import ThreadPoolExecutor
-    def get_count(table_name, filter_func=None):
-        query = sb.table(table_name).select("id", count="exact")
-        if filter_func:
-            query = filter_func(query)
-        res = query.execute()
-        return res.count or 0
-
-    filters = [
-        ("profiles", lambda q: q.eq("role", "student")),
-        ("exams", None),
-        ("attempts", lambda q: q.eq("status", "in_progress")),
-        ("attempts", lambda q: q.in_("status", ["submitted", "auto_submitted"])),
-        ("event_logs", lambda q: q.in_("event_type", ["tab_switch", "window_blur", "violation"]))
-    ]
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(get_count, table, filt) for table, filt in filters]
-        counts = [f.result() for f in futures]
-    
-    return {
-        "total_students": counts[0],
-        "total_exams": counts[1],
-        "active_attempts": counts[2],
-        "completed_attempts": counts[3],
-        "total_violations": counts[4],
-    }
-
+        print(f"Error calculating monitor stats: {e}")
+        return {
+            "total_students": 0,
+            "active_attempts": 0,
+            "completed_attempts": 0,
+            "total_violations": 0,
+            "kicked_students": 0,
+            "network_disconnects": 0,
+            "total_exams": 0,
+            "avg_score": 0,
+            "active_rules": 6
+        }
 
 @app.get("/api/admin/dashboard")
 async def get_admin_dashboard(user=Depends(require_admin)):
@@ -1808,40 +1940,61 @@ async def get_admin_dashboard(user=Depends(require_admin)):
     
     def fetch_stats():
         try:
-            if not IS_MOCK_MODE:
-                stats_res = sb.rpc("get_dashboard_stats").execute()
-                if stats_res.data:
-                    return stats_res.data
-        except Exception:
-            pass
-            
-        # Fallback counts query
-        def get_count(table_name, filter_func=None):
-            query = sb.table(table_name).select("id", count="exact")
-            if filter_func:
-                query = filter_func(query)
-            res = query.execute()
-            return res.count or 0
-            
-        filters = [
-            ("profiles", lambda q: q.eq("role", "student")),
-            ("exams", None),
-            ("attempts", lambda q: q.eq("status", "in_progress")),
-            ("attempts", lambda q: q.in_("status", ["submitted", "auto_submitted"])),
-            ("event_logs", lambda q: q.in_("event_type", ["tab_switch", "window_blur", "violation"]))
-        ]
-        
-        with ThreadPoolExecutor(max_workers=5) as sub_executor:
-            futures = [sub_executor.submit(get_count, table, filt) for table, filt in filters]
-            counts = [f.result() for f in futures]
-            
-        return {
-            "total_students": counts[0],
-            "total_exams": counts[1],
-            "active_attempts": counts[2],
-            "completed_attempts": counts[3],
-            "total_violations": counts[4],
-        }
+            now = datetime.now(timezone.utc)
+            if IS_MOCK_MODE:
+                live_data = list(db_store.live_sessions.values())
+            else:
+                live_res = sb.table("live_sessions").select("id, is_paused, connection_status, last_heartbeat").execute()
+                live_data = live_res.data or []
+
+            active_writing = 0
+            online_count = 0
+            for s in live_data:
+                last_hb_str = s.get("last_heartbeat")
+                if last_hb_str:
+                    try:
+                        hb_time = datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
+                        if (now - hb_time).total_seconds() <= 35:
+                            online_count += 1
+                            if not s.get("is_paused"):
+                                active_writing += 1
+                    except Exception:
+                        pass
+
+            if IS_MOCK_MODE:
+                exam_count = len(db_store.exams)
+                completed_count = len([a for a in db_store.attempts.values() if a.get("status") in ("submitted", "auto_submitted")])
+                student_count = len(db_store.users)
+                viol_count = len(db_store.violations) if active_writing > 0 else 0
+            else:
+                exams_res = sb.table("exams").select("id", count="exact").execute()
+                exam_count = exams_res.count or 0
+
+                completed_res = sb.table("attempts").select("id", count="exact").in_("status", ["submitted", "auto_submitted"]).execute()
+                completed_count = completed_res.count or 0
+
+                profiles_res = sb.table("profiles").select("id", count="exact").eq("role", "student").execute()
+                student_count = profiles_res.count or 0
+
+                viol_res = sb.table("violations").select("id", count="exact").execute()
+                viol_count = viol_res.count if active_writing > 0 else 0
+
+            return {
+                "total_students": student_count,
+                "total_exams": exam_count,
+                "active_attempts": active_writing,
+                "completed_attempts": completed_count,
+                "total_violations": viol_count,
+            }
+        except Exception as e:
+            print(f"Error in fetch_stats: {e}")
+            return {
+                "total_students": 0,
+                "total_exams": 0,
+                "active_attempts": 0,
+                "completed_attempts": 0,
+                "total_violations": 0,
+            }
         
     def fetch_exams():
         result = sb.table("exams").select("id, title, duration, is_published, created_by, created_at, start_time, end_time, negative_marking, pass_threshold, max_violations, allowed_violations, profiles(name)").order("created_at", desc=True).execute()
@@ -1861,7 +2014,7 @@ async def get_admin_dashboard(user=Depends(require_admin)):
 async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
     try:
         sb = get_supabase()
-        query = sb.table("attempts").select("*, profiles(name, email), exams(title, pass_threshold)").order("created_at", desc=True)
+        query = sb.table("attempts").select("*, profiles(name, email), exams(id, title, pass_threshold)").order("created_at", desc=True)
         if exam_id:
             query = query.eq("exam_id", exam_id)
         result = query.execute()
@@ -1879,19 +2032,94 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
             print("Fallback query error:", inner_err)
             data = []
 
+    if data and not IS_MOCK_MODE:
+        try:
+            sb = get_supabase()
+            att_ids = [r["id"] for r in data if r.get("id")]
+            exam_ids = list({r["exam_id"] for r in data if r.get("exam_id")})
+            
+            try:
+                ans_res = sb.table("answers").select("attempt_id, question_id, selected_option, selected_answer_text, is_correct, created_at").in_("attempt_id", att_ids).execute()
+                answers_data = ans_res.data or []
+            except Exception:
+                ans_res = sb.table("answers").select("attempt_id, question_id, selected_option, is_correct, created_at").in_("attempt_id", att_ids).execute()
+                answers_data = ans_res.data or []
+            
+            try:
+                q_res = sb.table("questions").select("id, exam_id, question_type, correct_answer, accepted_answers, options, marks").in_("exam_id", exam_ids).execute()
+                questions_data = q_res.data or []
+            except Exception:
+                q_res = sb.table("questions").select("id, exam_id, correct_answer, marks").in_("exam_id", exam_ids).execute()
+                questions_data = q_res.data or []
+                for q in questions_data:
+                    q["question_type"] = "mcq"
+                    q["accepted_answers"] = []
+                    q["options"] = []
+
+            ans_by_att = {}
+            for a in answers_data:
+                ans_by_att.setdefault(a["attempt_id"], []).append(a)
+
+            q_by_exam = {}
+            for q in questions_data:
+                q_by_exam.setdefault(q["exam_id"], []).append(q)
+
+            for r in data:
+                e_id = r.get("exam_id")
+                e_questions = q_by_exam.get(e_id, [])
+                att_answers = ans_by_att.get(r["id"], [])
+                ans_map = {ans["question_id"]: ans for ans in att_answers}
+
+                if e_questions:
+                    calc_score = 0
+                    calc_total_marks = 0
+                    corr_cnt = 0
+                    wrg_cnt = 0
+                    skp_cnt = 0
+
+                    for q in e_questions:
+                        q_marks = q.get("marks") or 1
+                        calc_total_marks += q_marks
+                        ans = ans_map.get(q["id"])
+                        if ans:
+                            is_skp, is_corr = evaluate_question_answer(q, ans.get("selected_option"), ans.get("selected_answer_text"))
+                            if not is_corr and ans.get("is_correct"):
+                                is_corr = True
+                                is_skp = False
+                            if is_skp:
+                                skp_cnt += 1
+                            elif is_corr:
+                                corr_cnt += 1
+                                calc_score += q_marks
+                            else:
+                                wrg_cnt += 1
+                        else:
+                            skp_cnt += 1
+
+                    r["total_marks"] = calc_total_marks if calc_total_marks > 0 else (r.get("total_marks") or 1)
+                    r["score"] = calc_score
+                    r["correct_count"] = corr_cnt
+                    r["wrong_count"] = wrg_cnt
+                    r["skipped_count"] = skp_cnt
+
+                # Calculate valid submitted_at timestamp
+                sub_at = r.get("submitted_at")
+                if not sub_at:
+                    ans_dates = [a.get("created_at") for a in att_answers if a.get("created_at")]
+                    if ans_dates:
+                        sub_at = max(ans_dates)
+                    else:
+                        sub_at = r.get("started_at") or r.get("created_at")
+                r["submitted_at"] = sub_at
+        except Exception as eval_err:
+            print(f"Error in dynamic evaluation for results: {eval_err}")
+
     for r in data:
         score = r.get("score") or 0
         total_marks = r.get("total_marks") or 1
-        if r.get("percentage") is None:
-            r["percentage"] = round((score / total_marks) * 100, 2)
-        if r.get("correct_count") is None:
-            r["correct_count"] = score
-        if r.get("wrong_count") is None:
-            r["wrong_count"] = max(0, total_marks - score)
-        if r.get("skipped_count") is None:
-            r["skipped_count"] = 0
-        if r.get("time_taken") is None:
-            r["time_taken"] = 0
+        r["percentage"] = round((score / total_marks) * 100, 2)
+        if not r.get("submitted_at"):
+            r["submitted_at"] = r.get("started_at") or r.get("created_at")
 
         # Safe defaults for profile metadata
         p = r.get("profiles")
@@ -2091,179 +2319,205 @@ async def issue_warning(data: WarningCreate, user=Depends(require_admin)):
 
 @app.get("/api/live-students")
 async def get_live_students(user=Depends(require_admin)):
-    sb = get_supabase()
-    
-    # 1. Fetch active live sessions with last_heartbeat
-    sessions_res = sb.table("live_sessions").select("id, attempt_id, student_id, current_question_index, answered_count, time_remaining, browser, os, ip_address, connection_status, is_paused, last_heartbeat").execute()
-    sessions = sessions_res.data or []
-    
-    if not sessions:
-        return {"live_students": []}
+    try:
+        sb = get_supabase()
         
-    session_map = {s["attempt_id"]: s for s in sessions if s.get("attempt_id")}
-    active_attempt_ids = list(session_map.keys())
-    
-    # 2. Fetch ONLY the attempts matching active live sessions
-    attempts_res = sb.table("attempts").select(
-        "id, student_id, exam_id, status, violation_count, started_at, profiles(name, email), exams(title)"
-    ).in_("id", active_attempt_ids).execute()
-    attempts_data = attempts_res.data or []
-    
-    # Clean up stale live_sessions for submitted attempts & filter out non-active attempts
-    now = datetime.now(timezone.utc)
-    valid_attempts = []
-    for att in attempts_data:
-        att_id = att.get("id")
-        att_status = att.get("status")
-        if att_status in ("submitted", "auto_submitted"):
-            try:
-                sb.table("live_sessions").delete().eq("attempt_id", att_id).execute()
-            except Exception:
-                pass
-        else:
-            valid_attempts.append(att)
-
-    attempts_data = valid_attempts
-
-    # Get all unique exam_ids to fetch question counts in bulk
-    exam_ids = {att["exam_id"] for att in attempts_data if att.get("exam_id")}
-    
-    # Get question counts in bulk
-    q_counts = {}
-    if exam_ids:
-        if IS_MOCK_MODE:
-            for eid in exam_ids:
-                q_counts[eid] = len(db_store.questions.get(eid, []))
-        else:
-            try:
-                q_res = sb.table("questions").select("exam_id, id").in_("exam_id", list(exam_ids)).execute()
-                if q_res.data:
-                    from collections import Counter
-                    q_counts = Counter(q["exam_id"] for q in q_res.data)
-            except Exception as e:
-                print(f"Error fetching question counts in bulk: {e}")
-                
-    # Get kick reasons in bulk (only for terminated attempts)
-    terminated_attempt_ids = [att["id"] for att in attempts_data if att.get("status") == "terminated"]
-    kick_reasons = {}
-    if terminated_attempt_ids:
-        if IS_MOCK_MODE:
-            for k in db_store.kick_logs:
-                if k.get("attempt_id") in terminated_attempt_ids:
-                    kick_reasons[k["attempt_id"]] = k.get("reason", "Terminated due to rule violations.")
-        else:
-            try:
-                kick_res = sb.table("kick_logs").select("attempt_id, reason").in_("attempt_id", terminated_attempt_ids).execute()
-                if kick_res.data:
-                    kick_reasons = {k["attempt_id"]: k["reason"] for k in kick_res.data}
-            except Exception as e:
-                print(f"Error fetching kick reasons in bulk: {e}")
-                
-    results = []
-    for att in attempts_data:
-        student_id = att.get("student_id")
-        attempt_id = att.get("id")
-        exam_id = att.get("exam_id")
+        # 1. Fetch active live sessions with last_heartbeat
+        sessions_res = sb.table("live_sessions").select("id, attempt_id, student_id, current_question_index, answered_count, time_remaining, browser, os, ip_address, connection_status, is_paused, last_heartbeat").execute()
+        sessions = sessions_res.data or []
         
-        # Get live session metadata if exists
-        s = session_map.get(attempt_id, {})
-        
-        # Profile details from joined response
-        profile_data = att.get("profiles") or {}
-        # Exam details from joined response
-        exam_data = att.get("exams") or {}
-        
-        # Get question count
-        q_count = q_counts.get(exam_id, 0)
-        if q_count == 0:
-            q_count = 1  # avoid division by zero
+        if not sessions:
+            return {"live_students": []}
             
-        kick_reason = kick_reasons.get(attempt_id, "Terminated due to rule violations.") if att.get("status") == "terminated" else ""
+        session_map = {s["attempt_id"]: s for s in sessions if s.get("attempt_id")}
+        active_attempt_ids = list(session_map.keys())
         
-        student_name = profile_data.get("name") or "Student"
-        student_email = profile_data.get("email") or ""
+        # 2. Fetch ONLY the attempts matching active live sessions
+        attempts_res = sb.table("attempts").select(
+            "id, student_id, exam_id, status, violation_count, started_at, profiles(name, email), exams(title)"
+        ).in_("id", active_attempt_ids).execute()
+        attempts_data = attempts_res.data or []
         
-        # Determine real active connection status based on last_heartbeat age
-        conn_status = s.get("connection_status", "connected") if s else "disconnected"
-        last_hb_str = s.get("last_heartbeat") if s else None
-        if last_hb_str and conn_status == "connected":
-            try:
-                last_hb = datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
-                if (now - last_hb).total_seconds() > 35:
-                    conn_status = "disconnected"
-            except Exception:
-                pass
+        # Clean up stale live_sessions for submitted attempts & filter out non-active attempts
+        now = datetime.now(timezone.utc)
+        valid_attempts = []
+        for att in attempts_data:
+            att_id = att.get("id")
+            att_status = att.get("status")
+            if att_status in ("submitted", "auto_submitted"):
+                try:
+                    sb.table("live_sessions").delete().eq("attempt_id", att_id).execute()
+                except Exception:
+                    pass
+            else:
+                valid_attempts.append(att)
 
-        results.append({
-            "id": s.get("id") or f"temp-{attempt_id}",
-            "attempt_id": attempt_id,
-            "student_id": student_id,
-            "student_name": student_name,
-            "student_email": student_email,
-            "exam_name": exam_data.get("title", "Exam"),
-            "current_question": s.get("current_question_index", 0) + 1 if s else 1,
-            "answered_questions": s.get("answered_count", 0) if s else 0,
-            "total_questions": q_count,
-            "remaining_time": s.get("time_remaining", 0) if s else 0,
-            "progress_percent": int((s.get("answered_count", 0) / q_count) * 100) if s and q_count > 0 else 0,
-            "violation_count": att.get("violation_count", 0),
-            "status": att.get("status", "in_progress"),
-            "browser": s.get("browser", "") if s else "",
-            "os": s.get("os", "") if s else "",
-            "ip_address": s.get("ip_address", "") if s else "",
-            "login_time": att.get("started_at"),
-            "connection_status": conn_status,
-            "is_paused": s.get("is_paused", False) if s else False,
-            "kick_reason": kick_reason
-        })
+        attempts_data = valid_attempts
+
+        # Get all unique exam_ids to fetch question counts in bulk
+        exam_ids = {att["exam_id"] for att in attempts_data if att.get("exam_id")}
         
-    return {"live_students": results}
+        # Get question counts in bulk
+        q_counts = {}
+        if exam_ids:
+            if IS_MOCK_MODE:
+                for eid in exam_ids:
+                    q_counts[eid] = len(db_store.questions.get(eid, []))
+            else:
+                try:
+                    q_res = sb.table("questions").select("exam_id, id").in_("exam_id", list(exam_ids)).execute()
+                    if q_res.data:
+                        from collections import Counter
+                        q_counts = Counter(q["exam_id"] for q in q_res.data)
+                except Exception as e:
+                    print(f"Error fetching question counts in bulk: {e}")
+                    
+        # Get kick reasons in bulk (only for terminated attempts)
+        terminated_attempt_ids = [att["id"] for att in attempts_data if att.get("status") == "terminated"]
+        kick_reasons = {}
+        if terminated_attempt_ids:
+            if IS_MOCK_MODE:
+                for k in db_store.kick_logs:
+                    if k.get("attempt_id") in terminated_attempt_ids:
+                        kick_reasons[k["attempt_id"]] = k.get("reason", "Terminated due to rule violations.")
+            else:
+                try:
+                    kick_res = sb.table("kick_logs").select("attempt_id, reason").in_("attempt_id", terminated_attempt_ids).execute()
+                    if kick_res.data:
+                        kick_reasons = {k["attempt_id"]: k["reason"] for k in kick_res.data}
+                except Exception as e:
+                    print(f"Error fetching kick reasons in bulk: {e}")
+                    
+        results = []
+        for att in attempts_data:
+            student_id = att.get("student_id")
+            attempt_id = att.get("id")
+            exam_id = att.get("exam_id")
+            
+            # Get live session metadata if exists
+            s = session_map.get(attempt_id, {})
+            
+            # Profile details from joined response
+            profile_data = att.get("profiles") or {}
+            # Exam details from joined response
+            exam_data = att.get("exams") or {}
+            
+            # Get question count
+            q_count = q_counts.get(exam_id, 0)
+            if q_count == 0:
+                q_count = 1  # avoid division by zero
+                
+            kick_reason = kick_reasons.get(attempt_id, "Terminated due to rule violations.") if att.get("status") == "terminated" else ""
+            
+            student_name = profile_data.get("name") or "Student"
+            student_email = profile_data.get("email") or ""
+            
+            # Determine real active connection status based on last_heartbeat age
+            last_hb_str = s.get("last_heartbeat") if s else None
+            conn_status = "disconnected"
+            if last_hb_str:
+                try:
+                    last_hb = datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
+                    if (now - last_hb).total_seconds() <= 35:
+                        conn_status = "connected"
+                except Exception:
+                    pass
+
+            # Determine explicit login_status string
+            att_status = att.get("status", "in_progress")
+            is_paused = s.get("is_paused", False) if s else False
+            if att_status == "terminated":
+                login_status = "terminated"
+            elif is_paused:
+                login_status = "logged_in_paused"
+            elif conn_status == "disconnected":
+                login_status = "disconnected"
+            else:
+                login_status = "logged_in_active"
+
+            results.append({
+                "id": s.get("id") or f"temp-{attempt_id}",
+                "attempt_id": attempt_id,
+                "student_id": student_id,
+                "student_name": student_name,
+                "student_email": student_email,
+                "exam_name": exam_data.get("title", "Exam"),
+                "current_question": s.get("current_question_index", 0) + 1 if s else 1,
+                "answered_questions": s.get("answered_count", 0) if s else 0,
+                "total_questions": q_count,
+                "remaining_time": s.get("time_remaining", 0) if s else 0,
+                "progress_percent": int((s.get("answered_count", 0) / q_count) * 100) if s and q_count > 0 else 0,
+                "violation_count": att.get("violation_count", 0),
+                "status": att.get("status", "in_progress"),
+                "browser": s.get("browser", "") if s else "",
+                "os": s.get("os", "") if s else "",
+                "ip_address": s.get("ip_address", "") if s else "",
+                "login_time": att.get("started_at"),
+                "connection_status": conn_status,
+                "login_status": login_status,
+                "is_paused": is_paused,
+                "kick_reason": kick_reason
+            })
+            
+        return {"live_students": results}
+    except Exception as err:
+        print(f"Error in get_live_students: {err}")
+        return {"live_students": []}
+
 
 @app.get("/api/activity-feed")
 async def get_activity_feed(user=Depends(require_admin)):
-    sb = get_supabase()
-    result = sb.table("activity_logs").select("*").order("created_at", desc=True).limit(50).execute()
-    return {"events": result.data or []}
+    try:
+        sb = get_supabase()
+        result = sb.table("activity_logs").select("*").order("created_at", desc=True).limit(50).execute()
+        return {"events": result.data or []}
+    except Exception as err:
+        print(f"Error in get_activity_feed: {err}")
+        return {"events": []}
 
 @app.get("/api/kick-history")
 async def get_kick_history(user=Depends(require_admin)):
-    sb = get_supabase()
-    result = sb.table("kick_logs").select("*").order("created_at", desc=True).execute()
-    kick_logs = result.data or []
-    if not kick_logs:
+    try:
+        sb = get_supabase()
+        result = sb.table("kick_logs").select("*").order("created_at", desc=True).execute()
+        kick_logs = result.data or []
+        if not kick_logs:
+            return {"kick_logs": []}
+            
+        student_ids = list({k["student_id"] for k in kick_logs if k.get("student_id")})
+        exam_ids = list({k["exam_id"] for k in kick_logs if k.get("exam_id")})
+        attempt_ids = list({k["attempt_id"] for k in kick_logs if k.get("attempt_id")})
+        
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            f_prof = executor.submit(lambda: sb.table("profiles").select("id, name, email").in_("id", student_ids).execute().data or [])
+            f_exam = executor.submit(lambda: sb.table("exams").select("id, title").in_("id", exam_ids).execute().data or [])
+            f_viol = executor.submit(lambda: sb.table("violations").select("id, attempt_id, violation_type, created_at").in_("attempt_id", attempt_ids).order("created_at", desc=False).execute().data or [])
+            
+        profiles_map = {p["id"]: p for p in f_prof.result()}
+        exams_map = {e["id"]: e for e in f_exam.result()}
+        
+        from collections import defaultdict
+        violations_map = defaultdict(list)
+        for v in f_viol.result():
+            violations_map[v["attempt_id"]].append(v)
+            
+        logs = []
+        for row in kick_logs:
+            prof = profiles_map.get(row.get("student_id"), {"name": "Student", "email": ""})
+            exam = exams_map.get(row.get("exam_id"), {"title": "Exam"})
+            logs.append({
+                **row,
+                "student_name": prof.get("name"),
+                "email": prof.get("email"),
+                "exam_title": exam.get("title"),
+                "department": "CSE" if "cse" in prof.get("email", "").lower() else "ECE",
+                "violations": violations_map.get(row.get("attempt_id"), [])
+            })
+        return {"kick_logs": logs}
+    except Exception as err:
+        print(f"Error in get_kick_history: {err}")
         return {"kick_logs": []}
-        
-    student_ids = list({k["student_id"] for k in kick_logs if k.get("student_id")})
-    exam_ids = list({k["exam_id"] for k in kick_logs if k.get("exam_id")})
-    attempt_ids = list({k["attempt_id"] for k in kick_logs if k.get("attempt_id")})
-    
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        f_prof = executor.submit(lambda: sb.table("profiles").select("id, name, email").in_("id", student_ids).execute().data or [])
-        f_exam = executor.submit(lambda: sb.table("exams").select("id, title").in_("id", exam_ids).execute().data or [])
-        f_viol = executor.submit(lambda: sb.table("violations").select("id, attempt_id, violation_type, created_at").in_("attempt_id", attempt_ids).order("created_at", desc=False).execute().data or [])
-        
-    profiles_map = {p["id"]: p for p in f_prof.result()}
-    exams_map = {e["id"]: e for e in f_exam.result()}
-    
-    from collections import defaultdict
-    violations_map = defaultdict(list)
-    for v in f_viol.result():
-        violations_map[v["attempt_id"]].append(v)
-        
-    logs = []
-    for row in kick_logs:
-        prof = profiles_map.get(row.get("student_id"), {"name": "Student", "email": ""})
-        exam = exams_map.get(row.get("exam_id"), {"title": "Exam"})
-        logs.append({
-            **row,
-            "student_name": prof.get("name"),
-            "email": prof.get("email"),
-            "exam_title": exam.get("title"),
-            "department": "CSE" if "cse" in prof.get("email", "").lower() else "ECE",
-            "violations": violations_map.get(row.get("attempt_id"), [])
-        })
-    return {"kick_logs": logs}
 
 @app.post("/api/force-submit")
 async def force_submit(data: AdminActionRequest, user=Depends(require_admin)):

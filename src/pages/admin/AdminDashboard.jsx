@@ -17,8 +17,8 @@ export default function AdminDashboard() {
   const { data: dashboardData, isLoading, error: dashboardError, refetch: refetchDashboard } = useQuery({
     queryKey: ['adminDashboard'],
     queryFn: () => api('/api/admin/dashboard'),
-    staleTime: 300000, // 5 minutes stale time
-    refetchInterval: 30000, // Poll every 30s
+    staleTime: 0, // Always serve fresh live data
+    refetchInterval: 3000, // Poll every 3 seconds for real-time live active attempts
   });
 
   const stats = dashboardData?.stats || {

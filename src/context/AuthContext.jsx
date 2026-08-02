@@ -63,14 +63,15 @@ export function ProtectedRoute({ children, role }) {
   const { user, loading } = useAuth();
   const navigate = useNavigate();
 
+  const isAllowed = !role || (Array.isArray(role) ? role.includes(user?.role) : user?.role === role);
+
   useEffect(() => {
     if (!loading && !user) {
       navigate('/login', { replace: true });
-    }
-    if (!loading && user && role && user.role !== role) {
+    } else if (!loading && user && !isAllowed) {
       navigate(user.role === 'admin' ? '/admin' : '/student', { replace: true });
     }
-  }, [user, loading, role, navigate]);
+  }, [user, loading, isAllowed, navigate]);
 
   if (loading) {
     return (
@@ -80,8 +81,7 @@ export function ProtectedRoute({ children, role }) {
     );
   }
 
-  if (!user) return null;
-  if (role && user.role !== role) return null;
+  if (!user || !isAllowed) return null;
 
   return children;
 }

@@ -229,14 +229,23 @@ export default function ExamPage() {
     } catch (e) {}
 
     try {
-      await api(`/api/attempts/${attemptId}/submit?auto=${isAuto}`, { method: 'POST' });
+      await api(`/api/attempts/${attemptId}/submit?auto=${isAuto}`, {
+        method: 'POST',
+        body: { answers }
+      });
     } catch (err) {
       console.warn('Submit request info:', err);
     } finally {
       try {
         localStorage.removeItem(`exam_answers_${attemptId}`);
       } catch (e) {}
-      navigate(`/student/result/${attemptId}`, { replace: true });
+      const sessionUser = (() => {
+        try {
+          return JSON.parse(localStorage.getItem('soems_user') || '{}');
+        } catch (e) { return {}; }
+      })();
+      const targetRoute = sessionUser?.role === 'admin' ? `/admin/result/${attemptId}` : `/student/result/${attemptId}`;
+      navigate(targetRoute, { replace: true });
     }
   };
 

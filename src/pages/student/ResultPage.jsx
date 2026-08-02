@@ -105,6 +105,13 @@ export default function ResultPage() {
     }
   };
 
+  const sessionUser = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('soems_user') || '{}');
+    } catch (e) { return {}; }
+  })();
+  const isBackToAdmin = sessionUser?.role === 'admin' || window.location.pathname.startsWith('/admin');
+
   return (
     <div className="app-container">
       {/* Print Styles Injection */}
@@ -137,11 +144,11 @@ export default function ResultPage() {
         <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
           <button
             className="btn btn-secondary"
-            onClick={() => navigate('/student')}
+            onClick={() => navigate(isBackToAdmin ? '/admin/results' : '/student')}
             style={{ display: 'flex', alignItems: 'center', gap: 6 }}
           >
             <ArrowLeft size={16} />
-            Back to Dashboard
+            {isBackToAdmin ? 'Back to Results' : 'Back to Dashboard'}
           </button>
           
           <button
@@ -157,94 +164,137 @@ export default function ResultPage() {
         {error && <div className="auth-error">{error}</div>}
 
         {result && (
-          <div className="dashboard-content" style={{ maxWidth: 800, margin: '0 auto' }}>
-            <div style={{ textAlign: 'center', marginBottom: 40 }}>
-              <div style={{
-                width: 64, height: 64, borderRadius: '50%',
-                background: isPassed ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 16px', color: isPassed ? '#16A34A' : '#DC2626'
-              }}>
-                <Award size={32} style={{ margin: 'auto' }} />
+          <div className="dashboard-content" style={{ maxWidth: 840, margin: '0 auto', background: '#FFFFFF', padding: 32, borderRadius: 12, border: '1.5px solid var(--border-light)', boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}>
+            
+            {/* Written Examination Institutional Header */}
+            <div style={{ textAlign: 'center', borderBottom: '2px double #1E3A8A', paddingBottom: 20, marginBottom: 24 }}>
+              <img src="/logo.png" alt="College Logo" style={{ height: 64, objectFit: 'contain', marginBottom: 8 }} />
+              <h2 style={{ fontSize: '1.4rem', color: '#1E3A8A', margin: 0, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                S.A. ENGINEERING COLLEGE (AUTONOMOUS)
+              </h2>
+              <p style={{ margin: '2px 0 6px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                Accredited by NBA & NAAC with 'A' Grade | Affiliated to Anna University
+              </p>
+              <div style={{ background: '#1E3A8A', color: '#FFFFFF', padding: '4px 16px', borderRadius: 4, display: 'inline-block', fontSize: '0.85rem', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' }}>
+                OFFICIAL WRITTEN EXAMINATION EVALUATION REPORT
               </div>
-              <h2>{isPassed ? 'Exam Passed' : 'Exam Failed'}</h2>
-              <p style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-secondary)' }}>{result.exams?.title}</p>
-              <div style={{ marginTop: 8 }}>
-                <span style={{
-                  padding: '6px 16px', borderRadius: '50px', fontWeight: 700, fontSize: '0.85rem',
-                  background: isPassed ? '#D1FAE5' : '#FEE2E2',
-                  color: isPassed ? '#065F46' : '#991B1B'
-                }}>
-                  {isPassed ? 'PASS' : 'FAIL'}
-                </span>
-              </div>
+            </div>
+
+            {/* Candidate & Examination Info Sheet */}
+            <div style={{
+              background: '#F8FAFC',
+              border: '1px solid #CBD5E1',
+              borderRadius: 8,
+              padding: 16,
+              marginBottom: 28
+            }}>
+              <table style={{ width: '100%', fontSize: '0.88rem', borderCollapse: 'collapse' }}>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569', width: '18%' }}>Student Name:</td>
+                    <td style={{ padding: '6px 12px', fontWeight: 600, color: '#0F172A', width: '32%' }}>{result.profiles?.name || sessionUser.name || 'Candidate'}</td>
+                    <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569', width: '18%' }}>Exam Title:</td>
+                    <td style={{ padding: '6px 12px', fontWeight: 600, color: '#0F172A', width: '32%' }}>{result.exams?.title || 'Examination'}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569' }}>Email / Reg No:</td>
+                    <td style={{ padding: '6px 12px', color: '#0F172A' }}>{result.profiles?.email || sessionUser.email || '—'}</td>
+                    <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569' }}>Dept & Sec:</td>
+                    <td style={{ padding: '6px 12px', color: '#0F172A' }}>
+                      {result.profiles?.department || 'CSE'} - {result.profiles?.section || 'A'}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569' }}>Exam Date:</td>
+                    <td style={{ padding: '6px 12px', color: '#0F172A' }}>
+                      {result.submitted_at ? new Date(result.submitted_at).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : '—'}
+                    </td>
+                    <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569' }}>Result Status:</td>
+                    <td style={{ padding: '6px 12px' }}>
+                      <span style={{
+                        padding: '3px 12px', borderRadius: 4, fontWeight: 700, fontSize: '0.8rem',
+                        background: isPassed ? '#D1FAE5' : '#FEE2E2',
+                        color: isPassed ? '#065F46' : '#991B1B',
+                        border: isPassed ? '1px solid #A7F3D0' : '1px solid #FECACA'
+                      }}>
+                        {isPassed ? 'PASSED' : 'FAILED'}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
 
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-              gap: 16,
+              gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+              gap: 12,
               marginBottom: 32
             }}>
-              <div className="stat-card" style={{ padding: 16 }}>
-                <div style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text)' }}>
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', background: '#F8FAFC' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#0F172A' }}>
                   {result.score} / {result.total_marks}
                 </div>
-                <div className="stat-label" style={{ fontSize: '0.78rem' }}>Marks Obtained</div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Total Marks</div>
               </div>
               
-              <div className="stat-card" style={{ padding: 16 }}>
-                <div style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text)' }}>
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', background: '#F8FAFC' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--primary)' }}>
                   {scorePercentage}%
                 </div>
-                <div className="stat-label" style={{ fontSize: '0.78rem' }}>Percentage</div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Percentage</div>
               </div>
 
-              <div className="stat-card" style={{ padding: 16, borderLeft: '3px solid #22C55E' }}>
-                <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#16A34A', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <CheckCircle2 size={20} />
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', borderLeft: '3px solid #22C55E' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#16A34A', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <CheckCircle2 size={18} />
                   {result.correct_count || 0}
                 </div>
-                <div className="stat-label" style={{ fontSize: '0.78rem' }}>Correct Answers</div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Correct</div>
               </div>
 
-              <div className="stat-card" style={{ padding: 16, borderLeft: '3px solid #EF4444' }}>
-                <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#DC2626', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <XCircle size={20} />
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', borderLeft: '3px solid #EF4444' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#DC2626', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <XCircle size={18} />
                   {result.wrong_count || 0}
                 </div>
-                <div className="stat-label" style={{ fontSize: '0.78rem' }}>Wrong Answers</div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Incorrect</div>
               </div>
 
-              <div className="stat-card" style={{ padding: 16, borderLeft: '3px solid #9CA3AF' }}>
-                <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#4B5563', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <AlertCircle size={20} />
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', borderLeft: '3px solid #9CA3AF' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#4B5563', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <AlertCircle size={18} />
                   {result.skipped_count || 0}
                 </div>
-                <div className="stat-label" style={{ fontSize: '0.78rem' }}>Skipped Count</div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Skipped</div>
               </div>
 
-              <div className="stat-card" style={{ padding: 16 }}>
-                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Timer size={18} />
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', background: '#F8FAFC' }}>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <Timer size={16} />
                   {formatTime(result.time_taken)}
                 </div>
-                <div className="stat-label" style={{ fontSize: '0.78rem' }}>Time Taken</div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Time Taken</div>
               </div>
             </div>
 
             {result.violation_count > 0 && (
-              <div className="violation-banner" style={{ marginBottom: 40, borderLeft: '4px solid #C62828' }}>
+              <div className="violation-banner" style={{ marginBottom: 32, borderLeft: '4px solid #C62828' }}>
                 <AlertTriangle size={20} />
                 <span>
-                  Our tracking system flagged {result.violation_count} instances of tab switching or browser window blur during this exam. All flags have been reported to the administrator.
+                  Proctoring Notice: {result.violation_count} security flag(s) logged during session.
                 </span>
               </div>
             )}
 
-            <h3 style={{ marginBottom: 20, borderBottom: '1.5px solid var(--border-light)', paddingBottom: 10 }}>
-              Question Breakdown
-            </h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, borderBottom: '2px solid #CBD5E1', paddingBottom: 10 }}>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1E293B', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Written Answer Evaluation Sheet
+              </h3>
+              <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                Total Questions: {answers.length}
+              </span>
+            </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
               {answers.map((ans, idx) => {

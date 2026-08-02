@@ -53,25 +53,39 @@ export default function LiveMonitor() {
   useEffect(() => {
     if (loading) return;
 
+    // Always poll every 3 seconds so live monitoring stats stay 100% synchronized
+    const pollInterval = setInterval(async () => {
+      try {
+        await refreshAll();
+      } catch (e) {
+        console.error("Polling error in LiveMonitor:", e);
+      }
+    }, 3000);
+
     const isMock = !import.meta.env.VITE_SUPABASE_URL || 
                    import.meta.env.VITE_SUPABASE_URL.includes('placeholder-project');
 
     if (isMock) {
-      // In offline mock mode, poll database API endpoints every 10 seconds (consolidated)
-      const pollInterval = setInterval(async () => {
-        try {
-          await refreshAll();
-        } catch (e) {
-          console.error("Polling error in mock mode:", e);
-        }
-      }, 10000);
-
       return () => clearInterval(pollInterval);
     }
 
     // Otherwise, listen to database changes via real Supabase WebSockets
     const eventChannel = supabase
       .channel('schema-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'live_sessions' },
+        async () => {
+          refreshAll();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'activity_logs' },
+        async () => {
+          refreshAll();
+        }
+      )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'event_logs' },
@@ -96,6 +110,7 @@ export default function LiveMonitor() {
       .subscribe();
 
     return () => {
+      clearInterval(pollInterval);
       supabase.removeChannel(eventChannel);
     };
   }, [loading]);

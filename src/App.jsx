@@ -92,7 +92,12 @@ export default function App() {
             </ProtectedRoute>
           } />
           <Route path="/student/result/:attemptId" element={
-            <ProtectedRoute role="student">
+            <ProtectedRoute role={["student", "admin"]}>
+              <ResultPage />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/result/:attemptId" element={
+            <ProtectedRoute role="admin">
               <ResultPage />
             </ProtectedRoute>
           } />

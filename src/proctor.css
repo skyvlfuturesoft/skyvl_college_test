@@ -291,6 +291,10 @@
   border-left: 4px solid var(--primary);
 }
 
+.admin-toast.login {
+  border-left: 4px solid #2563EB;
+}
+
 .admin-toast-content {
   flex-grow: 1;
 }

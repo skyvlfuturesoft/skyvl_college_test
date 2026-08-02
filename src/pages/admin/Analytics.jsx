@@ -43,8 +43,8 @@ export default function Analytics() {
   }
 
   const passFailData = [
-    { name: 'Pass', value: 72 },
-    { name: 'Fail', value: 28 },
+    { name: 'Pass', value: data?.stats?.pass_rate !== undefined ? data.stats.pass_rate : 72 },
+    { name: 'Fail', value: data?.stats?.pass_rate !== undefined ? Math.max(0, 100 - data.stats.pass_rate) : 28 },
   ];
 
   const avgScoreRadial = [
