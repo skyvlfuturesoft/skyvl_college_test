@@ -722,6 +722,30 @@ class SessionHeartbeat(BaseModel):
     is_paused: bool = False
 
 
+# ── Presence Tracking ──
+user_presence_store: dict[str, dict] = {}
+
+def record_user_presence(user_id: str, name: str = "", email: str = "", role: str = "student"):
+    if not user_id:
+        return
+    user_presence_store[user_id] = {
+        "user_id": user_id,
+        "name": name,
+        "email": email,
+        "role": role,
+        "last_seen": datetime.now(timezone.utc)
+    }
+
+@app.post("/api/user/ping")
+async def user_ping(user=Depends(get_current_user)):
+    record_user_presence(
+        user_id=user["id"],
+        name=user.get("name", ""),
+        email=user.get("email", ""),
+        role=user.get("role", "student")
+    )
+    return {"status": "ok"}
+
 # ── Health Check ──
 @app.get("/api/health")
 async def health():
@@ -866,6 +890,7 @@ async def login(data: LoginInput):
                     "activity_type": "user_login",
                     "message": log_msg
                 }).execute()
+                record_user_presence(str(result.user.id), name or result.user.email, result.user.email, role)
             except Exception as log_err:
                 print(f"Error recording login activity log: {log_err}")
 
@@ -2355,8 +2380,10 @@ async def get_live_students(user=Depends(require_admin)):
 
         attempts_data = valid_attempts
 
-        # Get unique student_ids and exam_ids
-        student_ids = list({att["student_id"] for att in attempts_data if att.get("student_id")} | {s["student_id"] for s in sessions if s.get("student_id")})
+        # Get unique student_ids and exam_ids including online presence
+        now = datetime.now(timezone.utc)
+        online_presences = [uid for uid, pinfo in user_presence_store.items() if pinfo.get("last_seen") and (now - pinfo["last_seen"]).total_seconds() <= 60]
+        student_ids = list({att["student_id"] for att in attempts_data if att.get("student_id")} | {s["student_id"] for s in sessions if s.get("student_id")} | set(online_presences))
         exam_ids = list({att["exam_id"] for att in attempts_data if att.get("exam_id")})
 
         # Fetch profiles and exams separately (100% reliable)
@@ -2412,7 +2439,7 @@ async def get_live_students(user=Depends(require_admin)):
             student_email = p.get("email") or ""
             exam_name = e.get("title") or "Exam"
             
-            # Determine real active connection status based on last_heartbeat age
+            # Determine real active connection status based on last_heartbeat age or user_presence_store
             last_hb_str = s.get("last_heartbeat") if s else None
             conn_status = "disconnected"
             if last_hb_str:
@@ -2422,6 +2449,12 @@ async def get_live_students(user=Depends(require_admin)):
                         conn_status = "connected"
                 except Exception:
                     pass
+
+            up_info = user_presence_store.get(student_id)
+            if conn_status == "disconnected" and up_info:
+                last_seen_dt = up_info.get("last_seen")
+                if last_seen_dt and (now - last_seen_dt).total_seconds() <= 60:
+                    conn_status = "connected"
 
             att_status = att.get("status", "in_progress")
             is_paused = s.get("is_paused", False) if s else False
@@ -2457,6 +2490,36 @@ async def get_live_students(user=Depends(require_admin)):
                 "is_paused": is_paused,
                 "kick_reason": kick_reason
             })
+
+        # Append online students currently browsing without active attempt
+        processed_student_ids = {r["student_id"] for r in results}
+        for uid in online_presences:
+            if uid not in processed_student_ids:
+                up = user_presence_store.get(uid, {})
+                p = p_map.get(uid, {})
+                results.append({
+                    "id": f"presence-{uid}",
+                    "attempt_id": None,
+                    "student_id": uid,
+                    "student_name": p.get("name") or up.get("name") or "Student",
+                    "student_email": p.get("email") or up.get("email") or "",
+                    "exam_name": "Logged In (Portal Active)",
+                    "current_question": 0,
+                    "answered_questions": 0,
+                    "total_questions": 0,
+                    "remaining_time": 0,
+                    "progress_percent": 0,
+                    "violation_count": 0,
+                    "status": "online",
+                    "browser": "Chrome",
+                    "os": "Windows",
+                    "ip_address": "127.0.0.1",
+                    "login_time": up.get("last_seen").isoformat() if up.get("last_seen") else now.isoformat(),
+                    "connection_status": "connected",
+                    "login_status": "logged_in_active",
+                    "is_paused": False,
+                    "kick_reason": ""
+                })
             
         return {"live_students": results}
     except Exception as err:

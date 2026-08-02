@@ -23,7 +23,7 @@ export default function AdminLiveCards({ students = [], stats = {}, kickedCount 
       (s) => s.status === 'in_progress' && !s.is_paused && s.connection_status === 'connected'
     );
     const onlineStudents = students.filter((s) => s.connection_status === 'connected');
-    const offlineStudents = students.filter((s) => s.connection_status === 'disconnected');
+    const disconnectedWriters = students.filter((s) => s.status === 'in_progress' && s.connection_status === 'disconnected');
     const uniqueExams = new Set(activeWritingStudents.map((s) => s.exam_name)).size;
     
     const totalProgress = activeWritingStudents.reduce((acc, s) => acc + (s.progress_percent || 0), 0);
@@ -37,12 +37,12 @@ export default function AdminLiveCards({ students = [], stats = {}, kickedCount 
       completed: stats.completed_attempts || 0,
       kicked: terminatedCount > 0 ? terminatedCount : (kickedCount || stats.kicked_students || 0),
       violations: currentViolations,
-      offline: offlineStudents.length,
+      offline: disconnectedWriters.length,
       exams: uniqueExams,
       avgProgress: calculatedAvgProgress,
       avgScore: stats.avg_score !== undefined ? stats.avg_score : 0,
       activeRules: 6,
-      networkLogs: offlineStudents.length
+      networkLogs: disconnectedWriters.length
     });
   }, [students, stats, kickedCount]);
 

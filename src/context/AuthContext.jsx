@@ -22,6 +22,21 @@ export function AuthProvider({ children }) {
   });
   const [loading, setLoading] = useState(false);
 
+  // Send periodic presence ping for logged in users
+  useEffect(() => {
+    if (!user) return;
+    const sendPing = async () => {
+      try {
+        await api('/api/user/ping', { method: 'POST' });
+      } catch (e) {
+        // ignore offline ping errors
+      }
+    };
+    sendPing();
+    const interval = setInterval(sendPing, 10000);
+    return () => clearInterval(interval);
+  }, [user]);
+
   const login = async (email, password) => {
     const data = await api('/api/auth/login', {
       method: 'POST',
