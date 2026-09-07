@@ -10,10 +10,11 @@ export default function StudentDashboard() {
   const navigate = useNavigate();
 
   const { data: dashboardData, isLoading, error: dashboardError } = useQuery({
-    queryKey: ['studentDashboard'],
+    queryKey: ['studentDashboard', user?.id || user?.email],
     queryFn: () => api('/api/student/dashboard'),
-    staleTime: 300000, // 5 minutes stale time
-    refetchInterval: 60000, // Poll every 60s
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchInterval: 60000,
   });
 
   const exams = dashboardData?.exams || [];

@@ -16,9 +16,10 @@ export default function TestHistory() {
   const itemsPerPage = 8;
 
   const { data: attemptsData, isLoading, error } = useQuery({
-    queryKey: ['studentAttemptsHistory'],
+    queryKey: ['studentAttemptsHistory', user?.id || user?.email],
     queryFn: () => api('/api/my-attempts'),
-    staleTime: 5000,
+    staleTime: 0,
+    refetchOnMount: 'always',
   });
 
   const attempts = attemptsData?.attempts || [];

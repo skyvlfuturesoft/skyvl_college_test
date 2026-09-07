@@ -64,6 +64,13 @@ export function AuthProvider({ children }) {
   const logout = () => {
     localStorage.removeItem('soems_user');
     localStorage.removeItem('soems_session');
+    try {
+      Object.keys(localStorage).forEach((k) => {
+        if (k.startsWith('exam_answers_') || k.startsWith('soems_')) {
+          localStorage.removeItem(k);
+        }
+      });
+    } catch (e) {}
     setUser(null);
   };
 
