@@ -11,7 +11,7 @@ import asyncio
 import time
 from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Header, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, File, UploadFile, BackgroundTasks, Response
 from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1263,12 +1263,39 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
         except Exception:
             pass  # skip timer check on parse error
 
+    sel_opt = data.selected_option
+    sel_txt = data.selected_answer_text
+
+    if sel_opt is not None and str(sel_opt).strip() != "" and str(sel_opt).strip() != "-1":
+        try:
+            sel_opt = int(sel_opt)
+        except (ValueError, TypeError):
+            pass
+
     # Fetch question to evaluate correctness dynamically
     is_correct = False
     try:
         q_res = sb.table("questions").select("*").eq("id", data.question_id).single().execute()
         if q_res.data:
-            _, is_correct = evaluate_question_answer(q_res.data, data.selected_option, data.selected_answer_text)
+            q_info = q_res.data
+            q_type = q_info.get("question_type") or "mcq"
+            opts = q_info.get("options") or []
+
+            if q_type in ("mcq", "image_mcq", "tf"):
+                if sel_opt is None and sel_txt:
+                    txt_clean = str(sel_txt).strip()
+                    if txt_clean.isdigit():
+                        sel_opt = int(txt_clean)
+                    else:
+                        for idx, opt_item in enumerate(opts):
+                            if str(opt_item).strip().lower() == txt_clean.lower():
+                                sel_opt = idx
+                                break
+                if sel_opt is not None and (sel_txt is None or str(sel_txt).strip() == ""):
+                    if 0 <= sel_opt < len(opts):
+                        sel_txt = opts[sel_opt]
+
+            _, is_correct = evaluate_question_answer(q_info, sel_opt, sel_txt)
     except Exception:
         pass
 
@@ -1276,7 +1303,7 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
     answer_payload = {
         "attempt_id": attempt_id,
         "question_id": data.question_id,
-        "selected_option": data.selected_option,
+        "selected_option": sel_opt,
         "is_correct": is_correct,
     }
 
@@ -1284,7 +1311,7 @@ async def save_answer(attempt_id: str, data: AnswerSubmit, user=Depends(get_curr
         try:
             sb.table("answers").upsert({
                 **answer_payload,
-                "selected_answer_text": data.selected_answer_text,
+                "selected_answer_text": sel_txt,
             }).execute()
         except Exception:
             sb.table("answers").upsert(answer_payload).execute()
@@ -1300,34 +1327,42 @@ def evaluate_question_answer(q: dict, selected_opt: any, selected_txt: any):
     """
     q_type = q.get("question_type") or "mcq"
     corr_ans = q.get("correct_answer")
+    options = q.get("options") or []
     
-    # 1. Determine if skipped
-    is_skipped = False
-    if q_type in ("mcq", "image_mcq"):
-        if selected_opt is None or selected_opt == "" or selected_opt == -1:
-            is_skipped = True
-    else:
-        if selected_txt is None or str(selected_txt).strip() == "":
-            is_skipped = True
-            
-    if is_skipped:
-        return True, False
-
-    # 2. Determine correctness
-    is_correct = False
-    if q_type in ("mcq", "image_mcq"):
-        options = q.get("options") or []
-        
-        # Try converting selected_opt to integer index
-        opt_idx = None
+    # Clean & normalize selected_opt and selected_txt
+    opt_idx = None
+    if selected_opt is not None and str(selected_opt).strip() != "" and str(selected_opt).strip() != "-1":
         try:
-            if selected_opt is not None and str(selected_opt).strip() != "":
-                opt_idx = int(selected_opt)
+            opt_idx = int(selected_opt)
         except (ValueError, TypeError):
             pass
 
+    clean_txt = str(selected_txt).strip() if selected_txt is not None else ""
+
+    # If opt_idx is None but clean_txt is present for MCQ, attempt matching clean_txt to option index
+    if q_type in ("mcq", "image_mcq", "tf"):
+        if opt_idx is None and clean_txt != "":
+            if clean_txt.isdigit():
+                opt_idx = int(clean_txt)
+            else:
+                for idx, opt_item in enumerate(options):
+                    if str(opt_item).strip().lower() == clean_txt.lower():
+                        opt_idx = idx
+                        break
+
+    # Determine if skipped
+    if q_type in ("mcq", "image_mcq", "tf"):
+        if opt_idx is None and clean_txt == "":
+            return True, False
+    else:
+        if clean_txt == "":
+            return True, False
+
+    # Evaluate correctness
+    is_correct = False
+    if q_type in ("mcq", "image_mcq", "tf"):
         if opt_idx is not None:
-            # Check A: Direct int / str int equality (e.g. opt_idx == 0 and corr_ans == 0 or "0")
+            # Check A: Direct int / str int equality
             try:
                 if corr_ans is not None and int(corr_ans) == opt_idx:
                     is_correct = True
@@ -1349,22 +1384,12 @@ def evaluate_question_answer(q: dict, selected_opt: any, selected_txt: any):
                 if opt_str == corr_str:
                     is_correct = True
         else:
-            # selected_opt is text instead of index
-            if isinstance(selected_opt, str):
-                stud_str = selected_opt.strip().lower()
-                corr_str = str(corr_ans).strip().lower() if corr_ans is not None else ""
-                if stud_str and stud_str == corr_str:
-                    is_correct = True
-                elif isinstance(options, list):
-                    for idx, opt_text in enumerate(options):
-                        if str(opt_text).strip().lower() == stud_str:
-                            _, is_correct = evaluate_question_answer(q, idx, None)
-                            break
+            if clean_txt and isinstance(corr_ans, str) and clean_txt.lower() == corr_ans.strip().lower():
+                is_correct = True
 
     elif q_type in ("fill_in_blank", "image_fib"):
-        student_ans = str(selected_txt).strip().lower()
+        student_ans = clean_txt.lower()
         accepted_list = q.get("accepted_answers") or []
-        
         if isinstance(accepted_list, str):
             try:
                 import json
@@ -1373,7 +1398,7 @@ def evaluate_question_answer(q: dict, selected_opt: any, selected_txt: any):
                 accepted_list = [accepted_list]
         if not isinstance(accepted_list, list):
             accepted_list = [accepted_list]
-            
+
         accepted_set = set()
         for item in accepted_list:
             if item is not None and str(item).strip() != "":
@@ -1381,7 +1406,7 @@ def evaluate_question_answer(q: dict, selected_opt: any, selected_txt: any):
 
         if corr_ans is not None and str(corr_ans).strip() != "":
             accepted_set.add(str(corr_ans).strip().lower())
-            
+
         is_correct = student_ans in accepted_set
 
     return False, is_correct
@@ -1444,30 +1469,47 @@ async def submit_attempt(attempt_id: str, auto: bool = False, payload: Optional[
                 q["question_type"] = "mcq"
                 q["options"] = []
 
-    # If payload includes client-side answers, upsert any unsaved answers
+    # If payload includes client-side answers, upsert/overwrite with latest client answers
     if payload and isinstance(payload.get("answers"), dict):
         client_answers = payload["answers"]
         new_answers = []
         for q in (questions.data or []):
             q_id = q["id"]
-            if q_id in client_answers and q_id not in answer_map:
+            if q_id in client_answers:
                 val = client_answers[q_id]
-                is_mcq = isinstance(val, int) or (isinstance(val, str) and str(val).isdigit())
-                sel_opt = int(val) if is_mcq else None
-                sel_txt = (q.get("options", [])[int(val)] if (is_mcq and q.get("options") and 0 <= int(val) < len(q.get("options", []))) else None) if is_mcq else str(val)
-                _, is_corr = evaluate_question_answer(q, sel_opt, sel_txt)
-                new_answers.append({
-                    "attempt_id": attempt_id,
-                    "question_id": q_id,
-                    "selected_option": sel_opt,
-                    "selected_answer_text": sel_txt,
-                    "is_correct": is_corr,
-                })
+                if val is not None and str(val).strip() != "":
+                    q_type = q.get("question_type") or "mcq"
+                    opts = q.get("options") or []
+                    sel_opt = None
+                    sel_txt = None
+
+                    if q_type in ("mcq", "image_mcq", "tf"):
+                        if isinstance(val, int) or (isinstance(val, str) and str(val).strip().isdigit()):
+                            sel_opt = int(val)
+                            if 0 <= sel_opt < len(opts):
+                                sel_txt = opts[sel_opt]
+                        elif isinstance(val, str):
+                            sel_txt = val.strip()
+                            for idx, opt_item in enumerate(opts):
+                                if str(opt_item).strip().lower() == sel_txt.lower():
+                                    sel_opt = idx
+                                    break
+                    else:
+                        sel_txt = str(val).strip()
+
+                    _, is_corr = evaluate_question_answer(q, sel_opt, sel_txt)
+                    new_answers.append({
+                        "attempt_id": attempt_id,
+                        "question_id": q_id,
+                        "selected_option": sel_opt,
+                        "selected_answer_text": sel_txt,
+                        "is_correct": is_corr,
+                    })
+                    answer_map[q_id] = (sel_opt, sel_txt)
+
         if new_answers:
             try:
                 sb.table("answers").upsert(new_answers).execute()
-                for a in new_answers:
-                    answer_map[a["question_id"]] = (a["selected_option"], a["selected_answer_text"])
             except Exception:
                 pass
 
@@ -1606,6 +1648,43 @@ async def get_attempt(attempt_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Attempt not found")
     if not is_attempt_authorized(result.data, user):
         raise HTTPException(status_code=403, detail="Unauthorized attempt access")
+        
+    # Calculate exact remaining_seconds server-side
+    if result.data.get("started_at") and result.data.get("exams"):
+        duration = result.data["exams"].get("duration") or 30
+        duration_sec = duration * 60
+        try:
+            started_raw = str(result.data["started_at"]).strip().replace(" ", "T")
+            if started_raw.endswith("Z"):
+                started_raw = started_raw[:-1] + "+00:00"
+            elif "+" not in started_raw and "-" not in started_raw[10:]:
+                started_raw = started_raw + "+00:00"
+                
+            started = datetime.fromisoformat(started_raw)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            else:
+                started = started.astimezone(timezone.utc)
+                
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+            if elapsed < 0:
+                elapsed = 0
+
+            if elapsed > (duration_sec + 15) and result.data.get("status") == "in_progress":
+                try:
+                    res_submit = await submit_attempt(attempt_id=attempt_id, auto=True, user=user)
+                    if isinstance(res_submit, dict) and "attempt" in res_submit:
+                        result.data = res_submit["attempt"]
+                except Exception:
+                    result.data["status"] = "auto_submitted"
+                result.data["remaining_seconds"] = 0
+            else:
+                result.data["remaining_seconds"] = max(0, int(duration_sec - elapsed))
+        except Exception:
+            result.data["remaining_seconds"] = duration * 60
+    else:
+        result.data["remaining_seconds"] = 1800
+
     return {"attempt": result.data}
 
 
@@ -2166,9 +2245,323 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
                 p["section"] = "A"
 
         if not r.get("exams") or not isinstance(r.get("exams"), dict):
-            r["exams"] = {"title": "Examination", "pass_threshold": 50}
-
     return {"results": data}
+
+
+@app.get("/api/results/export/excel")
+async def export_results_excel(exam_id: Optional[str] = None, user=Depends(require_admin)):
+    res_data = await get_results(exam_id=exam_id, user=user)
+    results_list = res_data.get("results") or []
+    
+    from io import BytesIO
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Academic Marksheet"
+    ws.views.sheetView[0].showGridLines = True
+    
+    # ── Style Definitions ──
+    hdr1_font = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
+    hdr1_fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+    
+    hdr2_font = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+    hdr2_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    
+    hdr3_font = Font(name="Calibri", size=11, bold=True, italic=True, color="0F172A")
+    hdr3_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    
+    table_hdr_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    table_hdr_fill = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
+    
+    even_row_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+    odd_row_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+    
+    pass_fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
+    pass_font = Font(name="Calibri", size=10, bold=True, color="065F46")
+    fail_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+    fail_font = Font(name="Calibri", size=10, bold=True, color="991B1B")
+    
+    summary_hdr_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    summary_hdr_fill = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
+    summary_label_font = Font(name="Calibri", size=10, bold=True, color="1E293B")
+    summary_label_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    summary_val_font = Font(name="Calibri", size=10, bold=True, color="0F172A")
+    
+    thin_border = Border(
+        left=Side(style='thin', color='CBD5E1'),
+        right=Side(style='thin', color='CBD5E1'),
+        top=Side(style='thin', color='CBD5E1'),
+        bottom=Side(style='thin', color='CBD5E1')
+    )
+    
+    # ── Institutional Header Block ──
+    ws.merge_cells('A1:R1')
+    ws['A1'] = "S.A. ENGINEERING COLLEGE (AUTONOMOUS)"
+    ws['A1'].font = hdr1_font
+    ws['A1'].fill = hdr1_fill
+    ws['A1'].alignment = Alignment(horizontal="center", vertical="center")
+    
+    ws.merge_cells('A2:R2')
+    ws['A2'] = "DEPARTMENT OF COMPUTER SCIENCE AND ENGINEERING"
+    ws['A2'].font = hdr2_font
+    ws['A2'].fill = hdr2_fill
+    ws['A2'].alignment = Alignment(horizontal="center", vertical="center")
+    
+    ws.merge_cells('A3:R3')
+    ws['A3'] = "OFFICIAL ACADEMIC EXAMINATION MARKSHEET & PERFORMANCE REPORT"
+    ws['A3'].font = hdr3_font
+    ws['A3'].fill = hdr3_fill
+    ws['A3'].alignment = Alignment(horizontal="center", vertical="center")
+    
+    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[2].height = 24
+    ws.row_dimensions[3].height = 22
+    ws.row_dimensions[4].height = 12
+    ws.row_dimensions[5].height = 28
+    
+    # ── Table Column Headers (Row 5) ──
+    headers = [
+        "S.No", "Register Number / Email", "Student Name", "Department", "Section", "Exam Title",
+        "Total Questions", "Attempted", "Skipped", "Correct", "Incorrect",
+        "Marks Obtained", "Maximum Marks", "Percentage (%)", "Result Status", "Proctoring Warnings", "Time Taken (Mins)", "Submission Date & Time"
+    ]
+    
+    for col_idx, h in enumerate(headers, 1):
+        cell = ws.cell(row=5, column=col_idx, value=h)
+        cell.fill = table_hdr_fill
+        cell.font = table_hdr_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+        
+    # ── Populate Student Data Rows (Starting Row 6) ──
+    total_passed = 0
+    total_failed = 0
+    percentages_list = []
+    highest_mark = 0
+    highest_max_mark = 0
+    
+    for idx, r in enumerate(results_list, 1):
+        p = r.get("profiles") or {}
+        e = r.get("exams") or {}
+        
+        corr = r.get("correct_count") or 0
+        wrg = r.get("wrong_count") or 0
+        skp = r.get("skipped_count") or 0
+        att = corr + wrg
+        tot_q = att + skp
+        
+        score = r.get("score") or 0
+        total_m = r.get("total_marks") or 1
+        pct = r.get("percentage") if r.get("percentage") is not None else round((score / total_m) * 100, 2)
+        percentages_list.append(pct)
+        
+        if score > highest_mark:
+            highest_mark = score
+            highest_max_mark = total_m
+            
+        pass_thresh = e.get("pass_threshold") or 50
+        is_pass = pct >= pass_thresh
+        if is_pass:
+            total_passed += 1
+            status_str = "PASS"
+        else:
+            total_failed += 1
+            status_str = "FAIL"
+            
+        sub_at = r.get("submitted_at") or r.get("created_at") or ""
+        if sub_at:
+            try:
+                sub_at = str(sub_at).replace("T", " ").split(".")[0]
+            except Exception:
+                pass
+                
+        time_taken_mins = round((r.get("time_taken") or 0) / 60.0, 1)
+        
+        row_vals = [
+            idx,
+            p.get("email") or "—",
+            p.get("name") or "—",
+            p.get("department") or "CSE",
+            p.get("section") or "A",
+            e.get("title") or "Examination",
+            tot_q,
+            att,
+            skp,
+            corr,
+            wrg,
+            score,
+            total_m,
+            f"{pct:.2f}%",
+            status_str,
+            r.get("violation_count") or 0,
+            time_taken_mins,
+            sub_at
+        ]
+        
+        row_idx = 5 + idx
+        ws.row_dimensions[row_idx].height = 20
+        row_fill = odd_row_fill if idx % 2 == 1 else even_row_fill
+        
+        for col_idx, val in enumerate(row_vals, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+            cell.fill = row_fill
+            
+            # Alignments
+            if col_idx in (1, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                
+            # Status styling
+            if col_idx == 15:
+                if is_pass:
+                    cell.fill = pass_fill
+                    cell.font = pass_font
+                else:
+                    cell.fill = fail_fill
+                    cell.font = fail_font
+
+    last_data_row = 5 + len(results_list)
+    if len(results_list) > 0:
+        ws.auto_filter.ref = f"A5:R{last_data_row}"
+
+    # ── Bottom Class Performance Summary Block ──
+    summary_start_row = last_data_row + 3
+    ws.row_dimensions[summary_start_row].height = 24
+    
+    ws.merge_cells(start_row=summary_start_row, start_column=1, end_row=summary_start_row, end_column=5)
+    sum_title_cell = ws.cell(row=summary_start_row, column=1, value="CLASS PERFORMANCE SUMMARY STATISTICS")
+    sum_title_cell.fill = summary_hdr_fill
+    sum_title_cell.font = summary_hdr_font
+    sum_title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    
+    total_assessed = len(results_list)
+    pass_rate = round((total_passed / total_assessed * 100), 2) if total_assessed > 0 else 0.0
+    avg_score_pct = round(sum(percentages_list) / total_assessed, 2) if total_assessed > 0 else 0.0
+    
+    summary_metrics = [
+        ("Total Assessed Students", total_assessed),
+        ("Passed Students (Pass ≥ 50%)", total_passed),
+        ("Failed Students", total_failed),
+        ("Overall Class Pass Rate", f"{pass_rate:.2f}%"),
+        ("Class Average Percentage", f"{avg_score_pct:.2f}%"),
+        ("Highest Score Achieved", f"{highest_mark} / {highest_max_mark if highest_max_mark > 0 else 1}")
+    ]
+    
+    for s_idx, (label, val) in enumerate(summary_metrics, 1):
+        curr_row = summary_start_row + s_idx
+        ws.row_dimensions[curr_row].height = 20
+        
+        # Label in Col A-C merged
+        ws.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=3)
+        lbl_cell = ws.cell(row=curr_row, column=1, value=label)
+        lbl_cell.font = summary_label_font
+        lbl_cell.fill = summary_label_fill
+        lbl_cell.border = thin_border
+        lbl_cell.alignment = Alignment(horizontal="left", vertical="center")
+        
+        # Also border merged cells
+        for c in range(2, 4):
+            ws.cell(row=curr_row, column=c).border = thin_border
+            ws.cell(row=curr_row, column=c).fill = summary_label_fill
+            
+        # Value in Col D-E merged
+        ws.merge_cells(start_row=curr_row, start_column=4, end_row=curr_row, end_column=5)
+        val_cell = ws.cell(row=curr_row, column=4, value=val)
+        val_cell.font = summary_val_font
+        val_cell.border = thin_border
+        val_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.cell(row=curr_row, column=5).border = thin_border
+
+    # ── Auto-adjust Column Widths ──
+    for col in ws.columns:
+        max_len = 0
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        for cell in col:
+            # Skip title rows and summary block from stretching column widths excessively
+            if cell.row in (1, 2, 3) or cell.row >= summary_start_row:
+                continue
+            val_str = str(cell.value or '')
+            if len(val_str) > max_len:
+                max_len = len(val_str)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
+        
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    file_name = f"SAEC_Official_Marksheet_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={file_name}"}
+    )
+
+
+@app.get("/api/results/export/csv")
+async def export_results_csv(exam_id: Optional[str] = None, user=Depends(require_admin)):
+    res_data = await get_results(exam_id=exam_id, user=user)
+    results_list = res_data.get("results") or []
+    
+    headers = [
+        "S.No", "Student Name", "Email / Reg No", "Department", "Section", "Exam Title",
+        "Total Questions", "Attempted", "Skipped", "Correct", "Incorrect",
+        "Score", "Total Marks", "Percentage (%)", "Result Status", "Violations", "Time Taken (s)", "Submitted At"
+    ]
+    
+    rows = []
+    for idx, r in enumerate(results_list, 1):
+        p = r.get("profiles") or {}
+        e = r.get("exams") or {}
+        corr = r.get("correct_count") or 0
+        wrg = r.get("wrong_count") or 0
+        skp = r.get("skipped_count") or 0
+        att = corr + wrg
+        tot_q = att + skp
+        score = r.get("score") or 0
+        total_m = r.get("total_marks") or 1
+        pct = r.get("percentage") if r.get("percentage") is not None else round((score / total_m) * 100, 2)
+        pass_thresh = e.get("pass_threshold") or 50
+        status_str = "PASSED" if pct >= pass_thresh else "FAILED"
+        sub_at = r.get("submitted_at") or r.get("created_at") or ""
+        
+        rows.append([
+            idx,
+            p.get("name") or "—",
+            p.get("email") or "—",
+            p.get("department") or "General",
+            p.get("section") or "A",
+            e.get("title") or "Examination",
+            tot_q,
+            att,
+            skp,
+            corr,
+            wrg,
+            score,
+            total_m,
+            f"{pct}%",
+            status_str,
+            r.get("violation_count") or 0,
+            r.get("time_taken") or 0,
+            sub_at
+        ])
+        
+    csv_lines = ['\uFEFF' + ','.join(headers)]
+    for r in rows:
+        formatted = [f'"{str(val).replace(chr(34), chr(34)+chr(34))}"' for val in r]
+        csv_lines.append(','.join(formatted))
+        
+    csv_content = '\n'.join(csv_lines)
+    file_name = f"SOEMS_Exam_Results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    
+    return Response(
+        content=csv_content,
+        media_type="text/csv;charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={file_name}"}
+    )
 
 
 # ============================================================
@@ -2737,6 +3130,11 @@ async def reinstate_attempt(attempt_id: str, user=Depends(require_admin)):
     }).execute()
     
     return {"success": True}
+
+
+@app.post("/api/reinstate-exam")
+async def reinstate_exam_action(data: AdminActionRequest, user=Depends(require_admin)):
+    return await reinstate_attempt(attempt_id=data.attempt_id, user=user)
 
 @app.get("/api/analytics")
 async def get_analytics(user=Depends(require_admin)):

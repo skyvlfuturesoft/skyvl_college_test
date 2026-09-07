@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
-import { Pause, Play, XCircle, Send, Wifi, WifiOff, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { Pause, Play, XCircle, Send, Wifi, WifiOff, ChevronLeft, ChevronRight, Search, RotateCcw } from 'lucide-react';
 import '../../proctor.css';
 
 export default function LiveStudentTable({ students = [], loading = false, onAction = () => {} }) {
@@ -405,7 +405,31 @@ export default function LiveStudentTable({ students = [], loading = false, onAct
                             </>
                           )}
                           {isTerminated && (
-                            <span style={{ fontSize: '0.75rem', color: '#EF4444', fontWeight: 600 }}>Closed</span>
+                            <button
+                              className="btn"
+                              onClick={() => {
+                                if (confirm(`Grant Re-intake for ${s.student_name}? This will restore their attempt status and allow them to resume.`)) {
+                                  handleAction('reinstate-exam', s.attempt_id);
+                                }
+                              }}
+                              style={{
+                                padding: '4px 10px',
+                                fontSize: '0.75rem',
+                                backgroundColor: '#10B981',
+                                color: '#FFFFFF',
+                                borderRadius: 'var(--radius-md)',
+                                border: 'none',
+                                cursor: 'pointer',
+                                fontWeight: 600,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 4
+                              }}
+                              title="Grant Re-intake"
+                            >
+                              <RotateCcw size={12} />
+                              Re-intake
+                            </button>
                           )}
                         </div>
                       </td>

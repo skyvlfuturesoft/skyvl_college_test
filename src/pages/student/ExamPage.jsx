@@ -44,16 +44,19 @@ export default function ExamPage() {
         
         const qData = await api(`/api/exams/${attemptData.attempt.exam_id}/questions`);
         
-        // Calculate remaining seconds based on server started_at timestamp to prevent drift
-        const start = new Date(attemptData.attempt.started_at).getTime();
-        const durationMs = attemptData.attempt.exams.duration * 60 * 1000;
-        endTimeRef.current = start + durationMs;
+        const serverRemaining = attemptData.attempt.remaining_seconds;
+        let remaining = 0;
+        if (serverRemaining !== undefined && serverRemaining !== null) {
+          remaining = Math.max(0, serverRemaining);
+        } else {
+          const start = new Date(attemptData.attempt.started_at).getTime();
+          const durationMs = (attemptData.attempt.exams?.duration || 30) * 60 * 1000;
+          remaining = Math.max(0, Math.floor((start + durationMs - Date.now()) / 1000));
+        }
+        endTimeRef.current = Date.now() + (remaining * 1000);
 
-        const now = Date.now();
-        const remaining = Math.max(0, Math.floor((endTimeRef.current - now) / 1000));
-        
         setAttempt(attemptData.attempt);
-        setQuestions(qData.questions);
+        setQuestions(qData.questions || []);
         setTimeLeft(remaining);
         setViolations(attemptData.attempt.violation_count || 0);
 
@@ -63,10 +66,15 @@ export default function ExamPage() {
           const resultData = await api(`/api/attempts/${attemptId}/result`);
           if (resultData && resultData.answers) {
             resultData.answers.forEach((ans) => {
-              if (ans.selected_option !== null && ans.selected_option !== undefined) {
-                savedAnswers[ans.question_id] = ans.selected_option;
-              } else if (ans.selected_answer_text !== null && ans.selected_answer_text !== undefined) {
-                savedAnswers[ans.question_id] = ans.selected_answer_text;
+              if (ans.selected_option !== null && ans.selected_option !== undefined && ans.selected_option !== '') {
+                savedAnswers[ans.question_id] = Number(ans.selected_option);
+              } else if (ans.selected_answer_text !== null && ans.selected_answer_text !== undefined && String(ans.selected_answer_text).trim() !== '') {
+                const textVal = String(ans.selected_answer_text).trim();
+                if (/^\d+$/.test(textVal)) {
+                  savedAnswers[ans.question_id] = Number(textVal);
+                } else {
+                  savedAnswers[ans.question_id] = textVal;
+                }
               }
             });
           }
@@ -104,7 +112,7 @@ export default function ExamPage() {
 
   // Timer loop with drift prevention
   useEffect(() => {
-    if (loading || timeLeft <= 0 || submitting || isPaused) return;
+    if (loading || submitting || isPaused) return;
 
     timerRef.current = setInterval(() => {
       if (!endTimeRef.current) return;
@@ -119,7 +127,7 @@ export default function ExamPage() {
     }, 1000);
 
     return () => clearInterval(timerRef.current);
-  }, [loading, timeLeft, submitting, isPaused]);
+  }, [loading, submitting, isPaused]);
 
   const dirtyAnswersRef = useRef({});
   const savingRef = useRef(false);
@@ -140,6 +148,7 @@ export default function ExamPage() {
   };
 
   const saveDirtyAnswers = async () => {
+    if (submitting || submittingRef.current) return;
     const dirty = { ...dirtyAnswersRef.current };
     if (Object.keys(dirty).length === 0 || savingRef.current) return;
     
@@ -151,9 +160,34 @@ export default function ExamPage() {
         let retries = 3;
         let success = false;
         const questionObj = questions.find((q) => q.id === qId);
-        const isMcq = typeof val === 'number';
-        const selOpt = isMcq ? val : null;
-        const selTxt = isMcq ? (questionObj?.options?.[val] || null) : val;
+        const qType = questionObj?.question_type || 'mcq';
+        const isMcqType = qType === 'mcq' || qType === 'image_mcq' || qType === 'tf';
+
+        let selOpt = null;
+        let selTxt = null;
+
+        if (val !== null && val !== undefined && val !== '') {
+          if (typeof val === 'number') {
+            selOpt = val;
+            selTxt = questionObj?.options?.[val] || null;
+          } else if (typeof val === 'string') {
+            const trimmed = val.trim();
+            if (isMcqType && /^\d+$/.test(trimmed)) {
+              selOpt = parseInt(trimmed, 10);
+              selTxt = questionObj?.options?.[selOpt] || null;
+            } else if (isMcqType && questionObj?.options) {
+              const idx = questionObj.options.findIndex(opt => String(opt).trim().toLowerCase() === trimmed.toLowerCase());
+              if (idx !== -1) {
+                selOpt = idx;
+                selTxt = questionObj.options[idx];
+              } else {
+                selTxt = trimmed;
+              }
+            } else {
+              selTxt = trimmed;
+            }
+          }
+        }
         
         const bodyPayload = {
           question_id: qId,
@@ -181,7 +215,7 @@ export default function ExamPage() {
           body: {
             attempt_id: attemptId,
             event_type: 'answer_saved',
-            details: { question_id: qId, option_index: isMcq ? val : null, answer_text: isMcq ? null : val }
+            details: { question_id: qId, option_index: selOpt, answer_text: selTxt }
           }
         }).catch(() => {});
       });
@@ -209,12 +243,13 @@ export default function ExamPage() {
   const handleSelectOption = (optionIdx) => {
     const q = questions[currentIdx];
     if (!q) return;
+    const numIdx = Number(optionIdx);
     setAnswers((prev) => {
-      const updated = { ...prev, [q.id]: optionIdx };
+      const updated = { ...prev, [q.id]: numIdx };
       saveLocalBackup(updated);
       return updated;
     });
-    dirtyAnswersRef.current[q.id] = optionIdx;
+    dirtyAnswersRef.current[q.id] = numIdx;
   };
 
   const submitExam = async (isAuto = false) => {
@@ -416,18 +451,22 @@ export default function ExamPage() {
               </div>
 
               {/* Render either option buttons or fill text field */}
-              {(currentQuestion.question_type === 'mcq' || currentQuestion.question_type === 'image_mcq' || !currentQuestion.question_type) ? (
+              {(currentQuestion.question_type === 'mcq' || currentQuestion.question_type === 'image_mcq' || currentQuestion.question_type === 'tf' || !currentQuestion.question_type) ? (
                 <div className="options-list">
-                  {currentQuestion.options.map((option, i) => (
-                    <button
-                      key={i}
-                      className={`option-btn ${answers[currentQuestion.id] === i ? 'selected' : ''}`}
-                      onClick={() => handleSelectOption(i)}
-                    >
-                      <span className="option-letter">{String.fromCharCode(65 + i)}</span>
-                      <span>{option}</span>
-                    </button>
-                  ))}
+                  {currentQuestion.options.map((option, i) => {
+                    const currentVal = answers[currentQuestion.id];
+                    const isSelected = currentVal !== undefined && currentVal !== null && String(currentVal) === String(i);
+                    return (
+                      <button
+                        key={i}
+                        className={`option-btn ${isSelected ? 'selected' : ''}`}
+                        onClick={() => handleSelectOption(i)}
+                      >
+                        <span className="option-letter">{String.fromCharCode(65 + i)}</span>
+                        <span>{option}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
                 <div style={{ marginTop: 24, padding: '0 8px' }}>
@@ -504,7 +543,8 @@ export default function ExamPage() {
               <h4 style={{ marginBottom: 16 }}>Overview</h4>
               <div className="q-grid">
                 {questions.map((q, idx) => {
-                  const answered = answers[q.id] !== undefined;
+                  const qAns = answers[q.id];
+                  const answered = qAns !== undefined && qAns !== null && qAns !== '' && qAns !== -1;
                   const active = idx === currentIdx;
                   return (
                     <button

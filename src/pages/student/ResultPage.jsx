@@ -227,7 +227,7 @@ export default function ResultPage() {
 
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
               gap: 12,
               marginBottom: 32
             }}>
@@ -243,6 +243,13 @@ export default function ResultPage() {
                   {scorePercentage}%
                 </div>
                 <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Percentage</div>
+              </div>
+
+              <div className="stat-card" style={{ padding: 14, textAlign: 'center', borderLeft: '3px solid #3B82F6' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#2563EB' }}>
+                  {(result.correct_count || 0) + (result.wrong_count || 0)} / {answers.length}
+                </div>
+                <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Attempted</div>
               </div>
 
               <div className="stat-card" style={{ padding: 14, textAlign: 'center', borderLeft: '3px solid #22C55E' }}>
@@ -264,7 +271,7 @@ export default function ResultPage() {
               <div className="stat-card" style={{ padding: 14, textAlign: 'center', borderLeft: '3px solid #9CA3AF' }}>
                 <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#4B5563', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                   <AlertCircle size={18} />
-                  {result.skipped_count || 0}
+                  {result.skipped_count !== undefined ? result.skipped_count : Math.max(0, answers.length - ((result.correct_count || 0) + (result.wrong_count || 0)))}
                 </div>
                 <div className="stat-label" style={{ fontSize: '0.75rem', fontWeight: 600 }}>Skipped</div>
               </div>

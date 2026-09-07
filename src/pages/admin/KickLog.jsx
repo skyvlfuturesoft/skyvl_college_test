@@ -163,7 +163,7 @@ export default function KickLog() {
                             fontWeight: 600
                           }}
                         >
-                          Reinstate
+                          Re-intake Student
                         </button>
                       </td>
                     </tr>

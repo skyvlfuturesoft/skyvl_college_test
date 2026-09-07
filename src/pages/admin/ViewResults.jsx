@@ -104,88 +104,106 @@ export default function ViewResults() {
     })[0];
   }
 
-  // Export spreadsheet utility (CSV with UTF-8 BOM for perfect Excel compatibility)
-  const exportToCSV = () => {
-    const headers = ['Student Name', 'Email', 'Department', 'Section', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
+  // Export CSV utility (UTF-8 BOM for Excel compatibility with full column breakdown)
+  const exportToCSV = async () => {
+    try {
+      const token = localStorage.getItem('soems_token') || localStorage.getItem('token');
+      const paramStr = selectedExam ? `?exam_id=${selectedExam}` : '';
+      const response = await fetch(`/api/results/export/csv${paramStr}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `SOEMS_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+    } catch (e) {}
+
+    // Fallback
+    const headers = ['S.No', 'Student Name', 'Email / Reg No', 'Department', 'Section', 'Exam Title', 'Total Questions', 'Attempted', 'Skipped', 'Correct', 'Incorrect', 'Score', 'Total Marks', 'Percentage (%)', 'Result Status', 'Violations', 'Submitted At'];
     let rows = [];
-    let fileName = `exam_results_${new Date().toISOString().slice(0, 10)}.csv`;
-    
     if (filteredResults.length > 0) {
-      rows = filteredResults.map(res => {
+      rows = filteredResults.map((res, idx) => {
         const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
         const dateStr = res.submitted_at || res.created_at ? new Date(res.submitted_at || res.created_at).toLocaleString() : '—';
+        const corr = res.correct_count || 0;
+        const wrg = res.wrong_count || 0;
+        const skp = res.skipped_count !== undefined ? res.skipped_count : 0;
+        const att = corr + wrg;
+        const totQ = att + skp;
+        const passThresh = res.exams?.pass_threshold || 50;
+        const statusStr = percentage >= passThresh ? 'PASSED' : 'FAILED';
+
         return [
+          idx + 1,
           res.profiles?.name || '—',
           res.profiles?.email || '—',
-          res.profiles?.department || '—',
-          res.profiles?.section || '—',
+          res.profiles?.department || 'General',
+          res.profiles?.section || 'A',
           res.exams?.title || '—',
-          res.score,
-          res.total_marks,
+          totQ,
+          att,
+          skp,
+          corr,
+          wrg,
+          res.score || 0,
+          res.total_marks || 1,
           `${percentage}%`,
+          statusStr,
           res.violation_count || 0,
-          dateStr,
-          res.status || 'submitted'
+          dateStr
         ];
       });
-    } else {
-      fileName = `exam_results_empty.csv`;
     }
-    
+
     const csvContent = '\uFEFF' + [
       headers.join(','),
       ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
     ].join('\n');
-    
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", fileName);
+    link.href = url;
+    link.download = `SOEMS_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  // Export spreadsheet utility (Excel Spreadsheet CSV format with UTF-8 BOM)
-  const exportToExcel = () => {
-    const headers = ['Student Name', 'Email', 'Department', 'Section', 'Exam Title', 'Score', 'Total Marks', 'Percentage', 'Violations', 'Submitted At', 'Status'];
-    let rows = [];
-    let fileName = `exam_results_${new Date().toISOString().slice(0, 10)}.csv`;
-    
-    if (filteredResults.length > 0) {
-      rows = filteredResults.map(res => {
-        const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
-        const dateStr = res.submitted_at || res.created_at ? new Date(res.submitted_at || res.created_at).toLocaleString() : '—';
-        return [
-          res.profiles?.name || '—',
-          res.profiles?.email || '—',
-          res.profiles?.department || '—',
-          res.profiles?.section || '—',
-          res.exams?.title || '—',
-          res.score,
-          res.total_marks,
-          `${percentage}%`,
-          res.violation_count || 0,
-          dateStr,
-          res.status || 'submitted'
-        ];
+  // Export native Excel spreadsheet utility (.xlsx)
+  const exportToExcel = async () => {
+    try {
+      const token = localStorage.getItem('soems_token') || localStorage.getItem('token');
+      const paramStr = selectedExam ? `?exam_id=${selectedExam}` : '';
+      const response = await fetch(`/api/results/export/excel${paramStr}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `SOEMS_Exam_Results_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+    } catch (e) {
+      console.warn('Backend excel export fallback:', e);
     }
-    
-    const csvContent = '\uFEFF' + [
-      headers.join(','),
-      ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
-    ].join('\n');
-    
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", fileName);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+
+    // Fallback to formatted CSV with BOM
+    exportToCSV();
   };
 
   if (loading) {
@@ -261,9 +279,9 @@ export default function ViewResults() {
               <button
                 className="btn btn-secondary"
                 onClick={exportToExcel}
-                style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'rgba(34, 197, 94, 0.1)', color: '#16A34A', border: '1.5px solid rgba(34, 197, 94, 0.3)' }}
+                style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'rgba(34, 197, 94, 0.1)', color: '#16A34A', border: '1.5px solid rgba(34, 197, 94, 0.3)', fontWeight: 600 }}
               >
-                📊 Export Excel
+                📊 Download Academic Marksheet (.xlsx)
               </button>
             </div>
           </div>
