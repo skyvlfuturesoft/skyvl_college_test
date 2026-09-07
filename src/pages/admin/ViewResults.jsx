@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, API_URL } from '../../lib/api';
-import { ArrowLeft, Search, Clock, Award, AlertTriangle, Eye, Printer, Filter } from 'lucide-react';
+import { ArrowLeft, Search, Clock, Award, AlertTriangle, Eye, Printer, Filter, RotateCcw } from 'lucide-react';
 import '../../app.css';
 
 export default function ViewResults() {
@@ -49,6 +49,22 @@ export default function ViewResults() {
       setError(err.message || 'Failed to filter results');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGrantReintake = async (attemptId, studentName) => {
+    if (!window.confirm(`Grant Re-intake for ${studentName || 'this student'}? This will reset their exam attempt and allow them to rewrite the exam.`)) {
+      return;
+    }
+    try {
+      await api(`/api/admin/attempts/${attemptId}/reinstate`, { method: 'POST' });
+      alert(`Re-intake granted successfully! ${studentName || 'Student'} can now rewrite the exam.`);
+      const data = await api('/api/results', {
+        params: selectedExam ? { exam_id: selectedExam } : {}
+      });
+      setResults(data.results || []);
+    } catch (err) {
+      alert(err.message || 'Failed to grant re-intake');
     }
   };
 
@@ -489,15 +505,26 @@ export default function ViewResults() {
                         </td>
                         <td>{res.submitted_at || res.started_at || res.created_at ? new Date(res.submitted_at || res.started_at || res.created_at).toLocaleString() : '—'}</td>
                         <td className="no-print">
-                          <button
-                            className="btn btn-secondary"
-                            onClick={() => navigate(`/student/result/${res.id}`)}
-                            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', backgroundColor: 'var(--lighter-blue)', color: 'var(--primary)', border: '1px solid var(--border-light)' }}
-                            title="View Written Test Sheet & Evaluation Report"
-                          >
-                            <Eye size={14} />
-                            View Written Report
-                          </button>
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => navigate(`/student/result/${res.id}`)}
+                              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', backgroundColor: 'var(--lighter-blue)', color: 'var(--primary)', border: '1px solid var(--border-light)' }}
+                              title="View Written Test Sheet & Evaluation Report"
+                            >
+                              <Eye size={14} />
+                              View Written Report
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => handleGrantReintake(res.id, res.profiles?.name)}
+                              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FCD34D', fontWeight: 600 }}
+                              title="Grant Re-intake to allow student to rewrite this exam"
+                            >
+                              <RotateCcw size={14} />
+                              Allow Rewrite
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
