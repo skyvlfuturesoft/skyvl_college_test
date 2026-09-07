@@ -2245,6 +2245,8 @@ async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)
                 p["section"] = "A"
 
         if not r.get("exams") or not isinstance(r.get("exams"), dict):
+            r["exams"] = {"title": "Examination", "pass_threshold": 50}
+
     return {"results": data}
 
 
