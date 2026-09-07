@@ -2115,7 +2115,7 @@ async def get_admin_dashboard(user=Depends(require_admin)):
 
 
 @app.get("/api/results")
-async def all_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
+async def get_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
     try:
         sb = get_supabase()
         query = sb.table("attempts").select("*, profiles(name, email), exams(id, title, pass_threshold)").order("created_at", desc=True)

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, API_URL } from '../../lib/api';
 import { ArrowLeft, Search, Clock, Award, AlertTriangle, Eye, Printer, Filter } from 'lucide-react';
 import '../../app.css';
 
@@ -104,12 +104,21 @@ export default function ViewResults() {
     })[0];
   }
 
+  // Safe token extractor matching api.js session storage format
+  const getAuthToken = () => {
+    try {
+      const session = JSON.parse(localStorage.getItem('soems_session') || '{}');
+      if (session.access_token) return session.access_token;
+    } catch (e) {}
+    return localStorage.getItem('soems_token') || localStorage.getItem('token') || '';
+  };
+
   // Export CSV utility (UTF-8 BOM for Excel compatibility with full column breakdown)
   const exportToCSV = async () => {
     try {
-      const token = localStorage.getItem('soems_token') || localStorage.getItem('token');
+      const token = getAuthToken();
       const paramStr = selectedExam ? `?exam_id=${selectedExam}` : '';
-      const response = await fetch(`/api/results/export/csv${paramStr}`, {
+      const response = await fetch(`${API_URL}/api/results/export/csv${paramStr}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
 
@@ -118,13 +127,16 @@ export default function ViewResults() {
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = `SOEMS_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
+        link.download = `SAEC_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        URL.revokeObjectURL(url);
         return;
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('Backend CSV export fallback:', e);
+    }
 
     // Fallback
     const headers = ['S.No', 'Student Name', 'Email / Reg No', 'Department', 'Section', 'Exam Title', 'Total Questions', 'Attempted', 'Skipped', 'Correct', 'Incorrect', 'Score', 'Total Marks', 'Percentage (%)', 'Result Status', 'Violations', 'Submitted At'];
@@ -172,38 +184,47 @@ export default function ViewResults() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `SOEMS_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `SAEC_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   // Export native Excel spreadsheet utility (.xlsx)
   const exportToExcel = async () => {
     try {
-      const token = localStorage.getItem('soems_token') || localStorage.getItem('token');
+      const token = getAuthToken();
       const paramStr = selectedExam ? `?exam_id=${selectedExam}` : '';
-      const response = await fetch(`/api/results/export/excel${paramStr}`, {
+      const targetUrl = `${API_URL}/api/results/export/excel${paramStr}`;
+      
+      const response = await fetch(targetUrl, {
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
 
       if (response.ok) {
         const blob = await response.blob();
+        if (blob.type && (blob.type.includes('json') || blob.type.includes('text/html'))) {
+          console.error('Export error: server returned text instead of binary excel spreadsheet');
+          return;
+        }
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = `SOEMS_Exam_Results_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        const dateStr = new Date().toISOString().slice(0, 10);
+        link.download = `SAEC_Official_Marksheet_${dateStr}.xlsx`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        URL.revokeObjectURL(url);
         return;
+      } else {
+        const errTxt = await response.text();
+        console.error('Excel export failed with status:', response.status, errTxt);
       }
     } catch (e) {
-      console.warn('Backend excel export fallback:', e);
+      console.error('Excel export request error:', e);
     }
-
-    // Fallback to formatted CSV with BOM
-    exportToCSV();
   };
 
   if (loading) {
