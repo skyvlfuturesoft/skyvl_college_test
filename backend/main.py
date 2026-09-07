@@ -276,10 +276,14 @@ class MockQueryBuilder:
         for k, v in self.filters.items():
             if k.endswith("_in"):
                 real_k = k[:-3]
-                if item.get(real_k) not in v:
+                val_list = [str(x).strip().lower() for x in v] if isinstance(v, (list, tuple, set)) else v
+                if str(item.get(real_k) or "").strip().lower() not in val_list:
                     return False
-            elif item.get(k) != v:
-                return False
+            else:
+                item_val = str(item.get(k) or "").strip().lower()
+                target_val = str(v or "").strip().lower()
+                if item_val != target_val:
+                    return False
         return True
 
     def _enrich(self, item):
@@ -1833,6 +1837,7 @@ async def get_result(attempt_id: str, user=Depends(get_current_user)):
 @app.get("/api/my-attempts")
 async def my_attempts(user=Depends(get_current_user)):
     sb = get_supabase()
+    user_id_str = str(user.get("id") or "").strip().lower()
     try:
         result = sb.table("attempts").select("id, student_id, exam_id, score, total_marks, status, violation_count, started_at, created_at, percentage, correct_count, wrong_count, skipped_count, time_taken, exams(title, duration)").eq("student_id", user["id"]).order("created_at", desc=True).execute()
     except Exception:
@@ -1845,12 +1850,15 @@ async def my_attempts(user=Depends(get_current_user)):
                 r["wrong_count"] = 0
                 r["skipped_count"] = 0
                 r["time_taken"] = 0
-    return {"attempts": result.data or []}
+    raw_attempts = result.data or []
+    filtered = [a for a in raw_attempts if str(a.get("student_id") or "").strip().lower() == user_id_str]
+    return {"attempts": filtered}
 
 
 @app.get("/api/student/dashboard")
 async def get_student_dashboard(user=Depends(get_current_user)):
     sb = get_supabase()
+    user_id_str = str(user.get("id") or "").strip().lower()
     
     from concurrent.futures import ThreadPoolExecutor
     
@@ -1871,7 +1879,8 @@ async def get_student_dashboard(user=Depends(get_current_user)):
                     r["wrong_count"] = 0
                     r["skipped_count"] = 0
                     r["time_taken"] = 0
-        return result.data or []
+        raw_attempts = result.data or []
+        return [a for a in raw_attempts if str(a.get("student_id") or "").strip().lower() == user_id_str]
         
     with ThreadPoolExecutor(max_workers=2) as executor:
         f_exams = executor.submit(fetch_exams)
