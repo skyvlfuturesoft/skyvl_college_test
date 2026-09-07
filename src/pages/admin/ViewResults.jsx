@@ -115,9 +115,19 @@ export default function ViewResults() {
 
   // Export CSV utility (UTF-8 BOM for Excel compatibility with full column breakdown)
   const exportToCSV = async () => {
+    const selectedExamObj = exams.find(e => e.id === selectedExam);
+    const examSlug = selectedExamObj ? selectedExamObj.title.replace(/[^a-zA-Z0-9_\-]/g, '_') : 'Filtered_Test';
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const fileName = `SAEC_${examSlug}_Results_${dateStr}.csv`;
+
     try {
       const token = getAuthToken();
-      const paramStr = selectedExam ? `?exam_id=${selectedExam}` : '';
+      const params = new URLSearchParams();
+      if (selectedExam) params.append('exam_id', selectedExam);
+      if (selectedDept) params.append('department', selectedDept);
+      if (selectedSection) params.append('section', selectedSection);
+      
+      const paramStr = params.toString() ? `?${params.toString()}` : '';
       const response = await fetch(`${API_URL}/api/results/export/csv${paramStr}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
@@ -127,7 +137,7 @@ export default function ViewResults() {
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = `SAEC_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
+        link.download = fileName;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -138,13 +148,13 @@ export default function ViewResults() {
       console.warn('Backend CSV export fallback:', e);
     }
 
-    // Fallback
+    // Fallback using filteredResults
     const headers = ['S.No', 'Student Name', 'Email / Reg No', 'Department', 'Section', 'Exam Title', 'Total Questions', 'Attempted', 'Skipped', 'Correct', 'Incorrect', 'Score', 'Total Marks', 'Percentage (%)', 'Result Status', 'Violations', 'Submitted At'];
     let rows = [];
     if (filteredResults.length > 0) {
       rows = filteredResults.map((res, idx) => {
         const percentage = res.percentage !== undefined ? res.percentage : Math.round((res.score / res.total_marks) * 100) || 0;
-        const dateStr = res.submitted_at || res.created_at ? new Date(res.submitted_at || res.created_at).toLocaleString() : '—';
+        const dateFormatted = res.submitted_at || res.created_at ? new Date(res.submitted_at || res.created_at).toLocaleString() : '—';
         const corr = res.correct_count || 0;
         const wrg = res.wrong_count || 0;
         const skp = res.skipped_count !== undefined ? res.skipped_count : 0;
@@ -157,7 +167,7 @@ export default function ViewResults() {
           idx + 1,
           res.profiles?.name || '—',
           res.profiles?.email || '—',
-          res.profiles?.department || 'General',
+          res.profiles?.department || 'CSE',
           res.profiles?.section || 'A',
           res.exams?.title || '—',
           totQ,
@@ -170,7 +180,7 @@ export default function ViewResults() {
           `${percentage}%`,
           statusStr,
           res.violation_count || 0,
-          dateStr
+          dateFormatted
         ];
       });
     }
@@ -184,7 +194,7 @@ export default function ViewResults() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `SAEC_Exam_Results_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -193,9 +203,19 @@ export default function ViewResults() {
 
   // Export native Excel spreadsheet utility (.xlsx)
   const exportToExcel = async () => {
+    const selectedExamObj = exams.find(e => e.id === selectedExam);
+    const examSlug = selectedExamObj ? selectedExamObj.title.replace(/[^a-zA-Z0-9_\-]/g, '_') : 'Marksheet';
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const fileName = `SAEC_Official_${examSlug}_${dateStr}.xlsx`;
+
     try {
       const token = getAuthToken();
-      const paramStr = selectedExam ? `?exam_id=${selectedExam}` : '';
+      const params = new URLSearchParams();
+      if (selectedExam) params.append('exam_id', selectedExam);
+      if (selectedDept) params.append('department', selectedDept);
+      if (selectedSection) params.append('section', selectedSection);
+      
+      const paramStr = params.toString() ? `?${params.toString()}` : '';
       const targetUrl = `${API_URL}/api/results/export/excel${paramStr}`;
       
       const response = await fetch(targetUrl, {
@@ -206,13 +226,13 @@ export default function ViewResults() {
         const blob = await response.blob();
         if (blob.type && (blob.type.includes('json') || blob.type.includes('text/html'))) {
           console.error('Export error: server returned text instead of binary excel spreadsheet');
+          exportToCSV();
           return;
         }
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        const dateStr = new Date().toISOString().slice(0, 10);
-        link.download = `SAEC_Official_Marksheet_${dateStr}.xlsx`;
+        link.download = fileName;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -225,6 +245,8 @@ export default function ViewResults() {
     } catch (e) {
       console.error('Excel export request error:', e);
     }
+    
+    exportToCSV();
   };
 
   if (loading) {

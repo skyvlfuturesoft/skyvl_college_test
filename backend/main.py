@@ -2116,10 +2116,17 @@ async def get_admin_dashboard(user=Depends(require_admin)):
 
 @app.get("/api/results")
 async def get_results(exam_id: Optional[str] = None, user=Depends(require_admin)):
+    def is_valid_uuid(val: str) -> bool:
+        try:
+            uuid.UUID(str(val))
+            return True
+        except (ValueError, AttributeError, TypeError):
+            return False
+
     try:
         sb = get_supabase()
         query = sb.table("attempts").select("*, profiles(name, email), exams(id, title, pass_threshold)").order("created_at", desc=True)
-        if exam_id:
+        if exam_id and (IS_MOCK_MODE or is_valid_uuid(exam_id)):
             query = query.eq("exam_id", exam_id)
         result = query.execute()
         data = result.data or []
@@ -2128,13 +2135,16 @@ async def get_results(exam_id: Optional[str] = None, user=Depends(require_admin)
         try:
             sb = get_supabase()
             query = sb.table("attempts").select("*").order("created_at", desc=True)
-            if exam_id:
+            if exam_id and (IS_MOCK_MODE or is_valid_uuid(exam_id)):
                 query = query.eq("exam_id", exam_id)
             result = query.execute()
             data = result.data or []
         except Exception as inner_err:
             print("Fallback query error:", inner_err)
             data = []
+
+    if exam_id:
+        data = [r for r in data if str(r.get("exam_id") or "").strip() == str(exam_id).strip()]
 
     if data and not IS_MOCK_MODE:
         try:
@@ -2251,10 +2261,22 @@ async def get_results(exam_id: Optional[str] = None, user=Depends(require_admin)
 
 
 @app.get("/api/results/export/excel")
-async def export_results_excel(exam_id: Optional[str] = None, user=Depends(require_admin)):
+async def export_results_excel(
+    exam_id: Optional[str] = None, 
+    department: Optional[str] = None,
+    section: Optional[str] = None,
+    user=Depends(require_admin)
+):
     res_data = await get_results(exam_id=exam_id, user=user)
     results_list = res_data.get("results") or []
     
+    if exam_id:
+        results_list = [r for r in results_list if str(r.get("exam_id") or "").strip() == str(exam_id).strip()]
+    if department:
+        results_list = [r for r in results_list if str((r.get("profiles") or {}).get("department") or "").strip().lower() == str(department).strip().lower()]
+    if section:
+        results_list = [r for r in results_list if str((r.get("profiles") or {}).get("section") or "").strip().lower() == str(section).strip().lower()]
+        
     from io import BytesIO
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -2298,6 +2320,13 @@ async def export_results_excel(exam_id: Optional[str] = None, user=Depends(requi
         bottom=Side(style='thin', color='CBD5E1')
     )
     
+    # Dynamic header title for specific exam
+    report_title = "OFFICIAL ACADEMIC EXAMINATION MARKSHEET & PERFORMANCE REPORT"
+    if exam_id and results_list:
+        spec_title = results_list[0].get("exams", {}).get("title")
+        if spec_title:
+            report_title = f"OFFICIAL ACADEMIC MARKSHEET: {spec_title.upper()}"
+
     # ── Institutional Header Block ──
     ws.merge_cells('A1:R1')
     ws['A1'] = "S.A. ENGINEERING COLLEGE (AUTONOMOUS)"
@@ -2312,7 +2341,7 @@ async def export_results_excel(exam_id: Optional[str] = None, user=Depends(requi
     ws['A2'].alignment = Alignment(horizontal="center", vertical="center")
     
     ws.merge_cells('A3:R3')
-    ws['A3'] = "OFFICIAL ACADEMIC EXAMINATION MARKSHEET & PERFORMANCE REPORT"
+    ws['A3'] = report_title
     ws['A3'].font = hdr3_font
     ws['A3'].fill = hdr3_fill
     ws['A3'].alignment = Alignment(horizontal="center", vertical="center")
@@ -2504,9 +2533,21 @@ async def export_results_excel(exam_id: Optional[str] = None, user=Depends(requi
 
 
 @app.get("/api/results/export/csv")
-async def export_results_csv(exam_id: Optional[str] = None, user=Depends(require_admin)):
+async def export_results_csv(
+    exam_id: Optional[str] = None, 
+    department: Optional[str] = None,
+    section: Optional[str] = None,
+    user=Depends(require_admin)
+):
     res_data = await get_results(exam_id=exam_id, user=user)
     results_list = res_data.get("results") or []
+    
+    if exam_id:
+        results_list = [r for r in results_list if str(r.get("exam_id") or "").strip() == str(exam_id).strip()]
+    if department:
+        results_list = [r for r in results_list if str((r.get("profiles") or {}).get("department") or "").strip().lower() == str(department).strip().lower()]
+    if section:
+        results_list = [r for r in results_list if str((r.get("profiles") or {}).get("section") or "").strip().lower() == str(section).strip().lower()]
     
     headers = [
         "S.No", "Student Name", "Email / Reg No", "Department", "Section", "Exam Title",
