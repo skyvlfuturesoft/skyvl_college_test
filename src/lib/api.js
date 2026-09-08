@@ -94,8 +94,8 @@ export async function api(endpoint, options = {}) {
     }
   }
 
-  const cleanMessage = (lastError && lastError.message !== 'Failed to fetch') 
-    ? lastError.message 
+  const cleanMessage = (lastError && lastError.message !== 'Failed to fetch')
+    ? lastError.message
     : 'Unable to connect to server. Please check your internet connection or try again in a moment.';
   throw new Error(cleanMessage);
 }

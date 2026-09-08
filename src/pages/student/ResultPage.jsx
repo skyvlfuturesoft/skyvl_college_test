@@ -201,7 +201,7 @@ export default function ResultPage() {
                     <td style={{ padding: '6px 12px', color: '#0F172A' }}>{result.profiles?.email || sessionUser.email || '—'}</td>
                     <td style={{ padding: '6px 12px', fontWeight: 700, color: '#475569' }}>Dept & Sec:</td>
                     <td style={{ padding: '6px 12px', color: '#0F172A' }}>
-                      {result.profiles?.department || 'CSE'} - {result.profiles?.section || 'A'}
+                      {result.profiles?.department || 'CSE'} - {result.profiles?.section || 'B'}
                     </td>
                   </tr>
                   <tr>
@@ -309,10 +309,10 @@ export default function ResultPage() {
                 const qType = q.question_type || 'mcq';
                 const isCorrect = ans.is_correct;
                 
-                // Determine skipped status
-                const isSkipped = (qType === 'mcq' || qType === 'image_mcq')
-                  ? (ans.selected_option === null || ans.selected_option === undefined || ans.selected_option === '')
-                  : (!ans.selected_answer_text || ans.selected_answer_text.trim() === '');
+                // Determine skipped status correctly
+                const hasOption = ans.selected_option !== null && ans.selected_option !== undefined && String(ans.selected_option).trim() !== '' && String(ans.selected_option).trim() !== '-1';
+                const hasText = ans.selected_answer_text && String(ans.selected_answer_text).trim() !== '' && !String(ans.selected_answer_text).startsWith('(Skipped');
+                const isSkipped = !hasOption && !hasText;
 
                 let badgeText = 'Wrong';
                 let badgeBg = '#FEE2E2';

@@ -2251,7 +2251,7 @@ async def get_results(exam_id: Optional[str] = None, user=Depends(require_admin)
                 "name": r.get("student_name") or "Student",
                 "email": r.get("student_email") or "",
                 "department": "General",
-                "section": "A"
+                "section": "B"
             }
         else:
             if not p.get("name"):
@@ -2261,7 +2261,7 @@ async def get_results(exam_id: Optional[str] = None, user=Depends(require_admin)
             if "department" not in p or not p["department"]:
                 p["department"] = "General"
             if "section" not in p or not p["section"]:
-                p["section"] = "A"
+                p["section"] = "B"
 
         if not r.get("exams") or not isinstance(r.get("exams"), dict):
             r["exams"] = {"title": "Examination", "pass_threshold": 50}
@@ -2424,7 +2424,7 @@ async def export_results_excel(
             p.get("email") or "—",
             p.get("name") or "—",
             p.get("department") or "CSE",
-            p.get("section") or "A",
+            p.get("section") or "B",
             e.get("title") or "Examination",
             tot_q,
             att,

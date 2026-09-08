@@ -184,7 +184,7 @@ export default function ViewResults() {
           res.profiles?.name || '—',
           res.profiles?.email || '—',
           res.profiles?.department || 'CSE',
-          res.profiles?.section || 'A',
+          res.profiles?.section || 'B',
           res.exams?.title || '—',
           totQ,
           att,
